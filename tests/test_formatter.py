@@ -2,6 +2,7 @@
 
 import pytest
 from app.bot.formatters.pick_formatter import format_picks, format_estado
+from app.data.db_health import SchemaStatus
 
 
 FIXTURE = {
@@ -33,6 +34,8 @@ PREDICTION = {
 TEAM_NAMES = {10: "Real Madrid", 20: "Barcelona"}
 LEAGUE_NAMES = {5: "La Liga"}
 
+
+# ── format_picks ───────────────────────────────────────────────────────────────
 
 def test_empty_predictions_returns_no_picks_message():
     result = format_picks([], [], {}, {})
@@ -72,16 +75,61 @@ def test_multiple_picks_separated():
     assert result.count("Real Madrid") == 2
 
 
-def test_format_estado_contains_counts():
-    estado = {"fixtures_today": 8, "odds_rows": 320, "picks_today": 3}
-    result = format_estado(estado)
+# ── format_estado ─────────────────────────────────────────────────────────────
+
+def _ready_schema() -> SchemaStatus:
+    return SchemaStatus(connection_ok=True, tables_ok=True)
+
+
+def test_format_estado_db_ready_shows_telegram_ok():
+    result = format_estado(_ready_schema(), {"fixtures_today": 0, "odds_rows": 0, "picks_today": 0})
+    assert "Telegram" in result
+    assert "OK" in result
+
+
+def test_format_estado_db_ready_shows_counts():
+    counts = {"fixtures_today": 8, "odds_rows": 320, "picks_today": 3}
+    result = format_estado(_ready_schema(), counts)
     assert "8" in result
     assert "320" in result
     assert "3" in result
 
 
-def test_format_estado_contains_labels():
-    estado = {"fixtures_today": 0, "odds_rows": 0, "picks_today": 0}
-    result = format_estado(estado)
+def test_format_estado_db_ready_shows_fixtures_label():
+    counts = {"fixtures_today": 4, "odds_rows": 100, "picks_today": 2}
+    result = format_estado(_ready_schema(), counts)
     assert "Fixtures" in result or "fixtures" in result
     assert "Picks" in result or "picks" in result
+
+
+def test_format_estado_conn_fail_shows_fail():
+    schema = SchemaStatus(connection_ok=False, error="timeout")
+    result = format_estado(schema, None)
+    assert "FAIL" in result
+    # Should NOT include the data section
+    assert "Fixtures" not in result
+
+
+def test_format_estado_schema_not_initialized():
+    schema = SchemaStatus(
+        connection_ok=True,
+        tables_ok=False,
+        missing_tables=["fixtures", "predictions"],
+    )
+    result = format_estado(schema, None)
+    assert "NO APLICADO" in result
+    assert "fixtures" in result
+    assert "predictions" in result
+    # Migration hint should appear
+    assert "001_init.sql" in result
+
+
+def test_format_estado_counts_none_shows_error_row():
+    result = format_estado(_ready_schema(), None)
+    assert "Error" in result
+
+
+def test_format_estado_zero_fixtures_shows_sync_hint():
+    counts = {"fixtures_today": 0, "odds_rows": 0, "picks_today": 0}
+    result = format_estado(_ready_schema(), counts)
+    assert "sync_today.py" in result

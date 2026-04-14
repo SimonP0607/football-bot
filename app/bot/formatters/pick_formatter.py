@@ -3,10 +3,16 @@
 All output uses HTML parse mode to avoid MarkdownV2 escaping issues.
 """
 
+from __future__ import annotations
+
 from datetime import datetime
+from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 from app.core.config import settings
+
+if TYPE_CHECKING:
+    from app.data.db_health import SchemaStatus
 
 
 def _kickoff_str(kickoff_at: str) -> str:
@@ -60,7 +66,11 @@ def format_picks(
         HTML-formatted string ready for ``reply_text(..., parse_mode='HTML')``.
     """
     if not predictions:
-        return "No hay picks publicables para hoy."
+        return (
+            "No hay picks publicables para hoy.\n\n"
+            "Si ya aplicaste las migraciones, sincroniza con:\n"
+            "<code>python scripts/sync_today.py</code>"
+        )
 
     fixture_by_id = {f["id"]: f for f in fixtures}
     lines: list[str] = []
@@ -101,11 +111,65 @@ def format_picks(
     return header + separator.join(lines)
 
 
-def format_estado(estado: dict) -> str:
-    """Build the HTML message shown by /estado."""
-    return (
-        "<b>Estado del bot</b>\n\n"
-        f"📅 Fixtures hoy: <b>{estado['fixtures_today']}</b>\n"
-        f"💹 Cuotas almacenadas: <b>{estado['odds_rows']}</b>\n"
-        f"🎯 Picks publicables: <b>{estado['picks_today']}</b>"
-    )
+def format_estado(schema: SchemaStatus, counts: dict | None) -> str:
+    """Build the HTML /estado message showing full system health.
+
+    Args:
+        schema: Result of ``db_health.check_schema()`` — describes connection
+                and schema readiness.
+        counts: Dict with keys ``fixtures_today``, ``odds_rows``,
+                ``picks_today``; or None if the query failed.
+
+    Returns:
+        HTML-formatted string for ``reply_text(..., parse_mode='HTML')``.
+    """
+    lines: list[str] = ["<b>Estado del sistema</b>", ""]
+
+    # ── Telegram (always OK if the handler is running) ─────────────────────────
+    lines.append("📡 Telegram:              <b>OK</b>")
+
+    # ── Supabase connection ────────────────────────────────────────────────────
+    if schema.connection_ok:
+        lines.append("🔌 Supabase:              <b>OK</b>")
+    else:
+        lines.append("🔌 Supabase:              <b>FAIL ✗</b>")
+        if schema.error:
+            lines.append(f"   └ {schema.error}")
+        lines.append("")
+        lines.append("Verifica <code>SUPABASE_URL</code> y <code>SUPABASE_KEY</code> en <code>.env</code>")
+        return "\n".join(lines)
+
+    # ── Schema ────────────────────────────────────────────────────────────────
+    if schema.tables_ok:
+        lines.append("🗄️  Schema:                <b>aplicado ✓</b>")
+    else:
+        lines.append("🗄️  Schema:                <b>NO APLICADO ✗</b>")
+        missing = "  ".join(schema.missing_tables)
+        lines.append(f"   └ Faltantes: <code>{missing}</code>")
+        lines.append("")
+        lines.append("<b>Aplica las migraciones en Supabase → SQL Editor:</b>")
+        lines.append("  <code>sql/migrations/001_init.sql</code>")
+        lines.append("  <code>sql/migrations/002_constraints_and_indexes.sql</code>")
+        lines.append("")
+        lines.append("Después reinicia el bot y ejecuta:")
+        lines.append("  <code>python scripts/sync_today.py</code>")
+        return "\n".join(lines)
+
+    # ── Data counts (only when schema is OK) ───────────────────────────────────
+    lines.append("")
+    if counts is None:
+        lines.append("❌ Error al obtener conteos — revisa los logs")
+    else:
+        fx = counts.get("fixtures_today", 0)
+        odds = counts.get("odds_rows", 0)
+        picks = counts.get("picks_today", 0)
+        lines.append(f"📅 Fixtures hoy:          <b>{fx}</b>")
+        lines.append(f"💹 Cuotas almacenadas:    <b>{odds}</b>")
+        lines.append(f"🎯 Picks publicables:     <b>{picks}</b>")
+
+        if fx == 0:
+            lines.append("")
+            lines.append("Sin datos para hoy. Ejecuta:")
+            lines.append("  <code>python scripts/sync_today.py</code>")
+
+    return "\n".join(lines)

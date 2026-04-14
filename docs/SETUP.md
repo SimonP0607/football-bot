@@ -13,6 +13,24 @@ Guía de configuración completa para dejar el bot operativo desde cero.
 
 ---
 
+## Orden de bootstrap (primer arranque)
+
+> Sigue exactamente este orden. Cada paso depende del anterior.
+
+```
+1.  Configurar .env
+2.  Arrancar bot en modo bootstrap → obtener Telegram user ID
+3.  Aplicar migraciones SQL en Supabase
+4.  Refrescar schema cache (si hace falta)
+5.  Verificar Supabase  →  python scripts/check_supabase.py
+6.  Verificar API-Football  →  python scripts/check_api_football.py
+7.  Sincronizar datos  →  python scripts/sync_today.py
+8.  Arrancar bot definitivo  →  python run.py
+9.  Probar  /estado  /hoy  /top  en Telegram
+```
+
+---
+
 ## Paso 1 — Entorno Python
 
 ```bash
@@ -37,12 +55,22 @@ pip install -r requirements.txt
 ## Paso 2 — Configurar .env
 
 ```bash
-# Copia la plantilla
 cp .env.example .env
 ```
 
-Abre `.env` y completa **todos** los campos marcados con `<COMPLETAR>`.
-Ver detalles de cada variable más abajo.
+Abre `.env` y completa todos los campos marcados con `<COMPLETAR>`:
+
+| Variable | De dónde obtenerla |
+|----------|-------------------|
+| `TELEGRAM_BOT_TOKEN` | @BotFather → /newbot |
+| `SUPABASE_URL` | Supabase → Project Settings → API → Project URL |
+| `SUPABASE_KEY` | Supabase → Project Settings → API → service_role (secret) |
+| `API_FOOTBALL_KEY` | api-football.com → Dashboard → Credenciales |
+| `DEFAULT_LEAGUE_IDS` | IDs de ligas a seguir (ej. `39,140`) |
+
+**Deja `TELEGRAM_ALLOWED_USER_ID=0` por ahora** — el bot arrancará en modo bootstrap para ayudarte a descubrir tu ID numérico.
+
+> ⚠️ Usa la `service_role` key de Supabase, **NO la `anon` key**.
 
 ---
 
@@ -50,52 +78,66 @@ Ver detalles de cada variable más abajo.
 
 1. Abre Telegram → busca **@BotFather**
 2. Envía `/newbot`
-3. Elige un nombre para el bot (ejemplo: `Football Picks Bot`)
-4. Elige un username (debe terminar en `bot`, ejemplo: `mipicks_bot`)
-5. BotFather te da el **token** — cópialo en `.env` como `TELEGRAM_BOT_TOKEN`
-
-### Encontrar tu Telegram user ID
-
-Necesitas tu ID numérico (un número entero, no tu @username) para `TELEGRAM_ALLOWED_USER_ID`.
-
-**Opción A** (recomendada):
-1. Completa `.env` con el token pero deja `TELEGRAM_ALLOWED_USER_ID=0`
-2. Arranca el bot: `python run.py`
-3. Abre Telegram → escribe `/id` al bot
-4. El bot te responde con tu ID numérico
-5. Cópialo en `.env` y reinicia el bot
-
-**Opción B** (sin arrancar el bot):
-- Manda cualquier mensaje al bot → los logs muestran `user_id=XXXXXXXX` en el WARNING de "Acceso no autorizado"
+3. Elige nombre y username (debe terminar en `bot`)
+4. Copia el token → ponlo en `.env` como `TELEGRAM_BOT_TOKEN`
 
 ---
 
-## Paso 4 — Supabase
+## Paso 4 — Obtener tu Telegram user ID
 
-### 4.1 Crear proyecto
+**Opción A — con el bot en modo bootstrap:**
+```bash
+python run.py
+# El bot arranca con un banner de MODO BOOTSTRAP en los logs
+# Abre Telegram → envía /id al bot → copia el número
+# Actualiza .env: TELEGRAM_ALLOWED_USER_ID=<número>
+# Ctrl+C → python run.py   (reinicia ya configurado)
+```
+
+**Opción B — sin arrancar el bot:**
+```bash
+python scripts/get_telegram_user_id.py
+# Muestra user IDs de mensajes recientes al bot
+```
+
+---
+
+## Paso 5 — Supabase: crear proyecto
+
 1. Ve a [supabase.com](https://supabase.com) → New Project
 2. Guarda el **Project URL** y la **service_role key** en `.env`
+3. Ejecuta el script de guía de bootstrap de DB:
 
-> ⚠️ Usa la `service_role` key, **NO la `anon` key**.
-> La encuentras en: Project Settings → API → `service_role` (secret)
+```bash
+python scripts/bootstrap_database.py
+```
 
-### 4.2 Aplicar migraciones
+Este script:
+- Verifica conexión
+- Detecta si faltan tablas
+- **Imprime el SQL completo** para copiar en el SQL Editor
+- Indica exactamente qué hacer en cada fase
 
-Las migraciones se aplican manualmente en el **SQL Editor** de Supabase.
+---
+
+## Paso 6 — Aplicar migraciones SQL
+
+Las migraciones deben aplicarse **manualmente** en el SQL Editor de Supabase
+(la API REST no permite ejecutar DDL directamente).
 
 1. Abre tu proyecto en Supabase → **SQL Editor** → New query
 2. Copia y pega el contenido de `sql/migrations/001_init.sql` → **Run**
-3. Copia y pega el contenido de `sql/migrations/002_constraints_and_indexes.sql` → **Run**
+3. Crea otra query y pega `sql/migrations/002_constraints_and_indexes.sql` → **Run**
 
 > Las sentencias usan `IF NOT EXISTS` y son idempotentes — pueden correrse varias veces sin daño.
 
-### 4.3 Verificar conexión
+### Verificar que las tablas existen
 
 ```bash
 python scripts/check_supabase.py
 ```
 
-Salida esperada:
+Salida esperada cuando todo está bien:
 ```
 === check_supabase.py ===
 
@@ -106,45 +148,24 @@ Salida esperada:
 [ 2 ] Conexión y tablas
   ✓ bot_users              (filas encontradas en muestra: 0)
   ✓ leagues                (filas encontradas en muestra: 0)
+  ✓ teams                  (filas encontradas en muestra: 0)
+  ✓ fixtures               (filas encontradas en muestra: 0)
+  ✓ odds_snapshots         (filas encontradas en muestra: 0)
+  ✓ predictions            (filas encontradas en muestra: 0)
+  ✓ prediction_results     (filas encontradas en muestra: 0)
   ...
 
 ✅  Supabase OK — el bot puede conectar correctamente.
 ```
 
-### 4.4 Insertar usuario autorizado (opcional)
-
-El bot usa `TELEGRAM_ALLOWED_USER_ID` desde `.env` para autorizar acceso.
-La tabla `bot_users` existe para uso futuro (multi-usuario, auditoría).
-
-Si quieres pre-poblarla manualmente:
-
-```sql
-INSERT INTO bot_users (telegram_user_id, username, is_admin)
-VALUES (TU_USER_ID_AQUI, 'tu_username', true);
-```
+Si ves errores `PGRST205` o "table not found":
+- Las migraciones no se aplicaron correctamente
+- Verifica que ejecutaste ambos archivos SQL en el SQL Editor
+- Recarga la página de Supabase (a veces el schema cache tarda unos segundos)
 
 ---
 
-## Paso 5 — API-Football
-
-### 5.1 Obtener API key
-1. Regístrate en [api-football.com](https://www.api-football.com)
-2. Ve al Dashboard → **Credenciales** → copia la API Key
-3. Pégala en `.env` como `API_FOOTBALL_KEY`
-
-### 5.2 Configurar ligas y temporada
-Busca los IDs de las ligas que quieres seguir en la documentación de API-Football:
-- `39` = Premier League
-- `140` = La Liga
-- `253` = Liga BetPlay (Colombia)
-- `135` = Serie A
-
-```env
-DEFAULT_LEAGUE_IDS=39,140
-DEFAULT_SEASON=2025
-```
-
-### 5.3 Verificar conexión
+## Paso 7 — Verificar API-Football
 
 ```bash
 python scripts/check_api_football.py --league 39 --season 2025
@@ -152,35 +173,36 @@ python scripts/check_api_football.py --league 39 --season 2025
 
 Salida esperada:
 ```
-=== check_api_football.py ===
-
-[ 1 ] Variables de entorno
-  ✓ API_FOOTBALL_BASE_URL = https://v3.football.api-sports.io
-  ✓ API_FOOTBALL_KEY = abc12345...
-
 [ 2 ] Conexión y credenciales (/status)
   ✓ Conectado correctamente
     Plan:              Free
-    Suscripción activa: True
     Requests hoy:      3 / 100
 
 [ 3 ] Datos de ejemplo (fixtures + odds)
-  Consultando fixtures — league=39, season=2025, date=2025-01-15
   ✓ Fixtures encontrados hoy: 4
+```
 
-✅  API-Football OK — credenciales válidas.
+### Configurar ligas y temporada
+
+Busca los IDs de las ligas que quieres seguir:
+- `39`  = Premier League
+- `140` = La Liga
+- `253` = Liga BetPlay (Colombia)
+- `135` = Serie A
+- `78`  = Bundesliga
+- `61`  = Ligue 1
+
+```env
+DEFAULT_LEAGUE_IDS=39,140
+DEFAULT_SEASON=2025
 ```
 
 ---
 
-## Paso 6 — Primer sync
+## Paso 8 — Primer sync de datos
 
 ```bash
-# Con defaults de .env
 python scripts/sync_today.py
-
-# O con valores explícitos
-python scripts/sync_today.py --leagues 39,140 --season 2025
 ```
 
 El script:
@@ -190,7 +212,7 @@ El script:
 
 ---
 
-## Paso 7 — Arrancar el bot
+## Paso 9 — Arrancar el bot
 
 ```bash
 python run.py
@@ -198,30 +220,84 @@ python run.py
 
 El bot:
 1. Valida las variables de entorno (falla rápido si faltan)
-2. Registra los comandos en Telegram (`/hoy`, `/top`, `/estado`, `/id`)
-3. Verifica la conexión a Supabase
+2. Registra los comandos en Telegram
+3. Verifica el schema de la DB (log `DB_NOT_INITIALIZED` si falta)
 4. Empieza a escuchar mensajes
 
 ### Probar localmente
 
 Abre Telegram → busca tu bot → envía:
-- `/start` → debe responder con la lista de comandos
-- `/id` → te muestra tu user ID
-- `/estado` → muestra el estado actual (fixtures, odds, picks)
-- `/hoy` → muestra picks del día (si hay sync previo con picks publicables)
+- `/estado` → **empieza siempre aquí** — muestra Telegram OK, Supabase OK, schema aplicado, conteos del día
+- `/id` → te muestra tu user ID (sin autenticación)
+- `/start` → lista de comandos
+- `/hoy` → picks del día (requiere sync previo)
+- `/top` → top picks por confianza
+
+---
+
+## Qué muestra /estado en cada fase del bootstrap
+
+### Fase 1 — Migraciones no aplicadas
+```
+Estado del sistema
+
+📡 Telegram:              OK
+🔌 Supabase:              OK
+🗄️  Schema:                NO APLICADO ✗
+   └ Faltantes: fixtures  predictions  ...
+
+Aplica las migraciones en Supabase → SQL Editor:
+  sql/migrations/001_init.sql
+  sql/migrations/002_constraints_and_indexes.sql
+```
+
+### Fase 2 — Schema OK pero sin datos
+```
+Estado del sistema
+
+📡 Telegram:              OK
+🔌 Supabase:              OK
+🗄️  Schema:                aplicado ✓
+
+📅 Fixtures hoy:          0
+💹 Cuotas almacenadas:    0
+🎯 Picks publicables:     0
+
+Sin datos para hoy. Ejecuta:
+  python scripts/sync_today.py
+```
+
+### Fase 3 — Todo operativo
+```
+Estado del sistema
+
+📡 Telegram:              OK
+🔌 Supabase:              OK
+🗄️  Schema:                aplicado ✓
+
+📅 Fixtures hoy:          12
+💹 Cuotas almacenadas:    450
+🎯 Picks publicables:     3
+```
 
 ---
 
 ## Referencia rápida de comandos
 
 ```bash
-# Verificar Supabase
+# Bootstrap DB — guía completa + SQL para copiar
+python scripts/bootstrap_database.py
+
+# Verificar Supabase (tablas + conteos)
 python scripts/check_supabase.py
 
 # Verificar API-Football
 python scripts/check_api_football.py --league 39 --season 2025
 
-# Sync manual
+# Descubrir tu Telegram user ID
+python scripts/get_telegram_user_id.py
+
+# Sincronizar fixtures y odds de hoy
 python scripts/sync_today.py
 
 # Arrancar bot
@@ -238,7 +314,7 @@ python -m pytest tests/ -v
 | Variable | Requerida | Descripción |
 |----------|-----------|-------------|
 | `TELEGRAM_BOT_TOKEN` | Sí | Token de BotFather |
-| `TELEGRAM_ALLOWED_USER_ID` | Sí | Tu Telegram user ID numérico |
+| `TELEGRAM_ALLOWED_USER_ID` | No (local) | Tu Telegram user ID numérico; `0` activa modo bootstrap |
 | `SUPABASE_URL` | Sí | URL del proyecto Supabase |
 | `SUPABASE_KEY` | Sí | service_role key de Supabase |
 | `API_FOOTBALL_KEY` | Sí | API key de api-football.com |
@@ -255,21 +331,39 @@ python -m pytest tests/ -v
 
 ---
 
+## Diagnóstico de errores frecuentes
+
+### `PGRST205 — Could not find the table 'public.fixtures'`
+**Causa:** Las migraciones SQL no se aplicaron.  
+**Solución:**
+1. `python scripts/bootstrap_database.py` → imprime el SQL completo
+2. Copia y ejecuta ambos archivos en Supabase → SQL Editor
+3. `python scripts/check_supabase.py` → verifica
+
+### Bot arranca en MODO BOOTSTRAP
+**Causa:** `TELEGRAM_ALLOWED_USER_ID` es 0 o no está configurado.  
+**Solución:** Envía `/id` al bot → copia el número → ponlo en `.env` → reinicia.
+
+### `ValueError: Variables de entorno requeridas no configuradas`
+**Causa:** Falta `TELEGRAM_BOT_TOKEN`, `SUPABASE_URL`, `SUPABASE_KEY`, o `API_FOOTBALL_KEY`.  
+**Solución:** Revisa `.env` y completa todos los valores `<COMPLETAR>`.
+
+### `/hoy` y `/top` muestran "La base de datos no está inicializada"
+**Causa:** Tablas faltantes.  
+**Solución:** Aplica las migraciones (ver arriba). El bot auto-detecta una vez aplicadas — no necesita reiniciarse.
+
+### `/hoy` responde "No hay picks publicables para hoy"
+**Causa:** No se ha corrido `sync_today.py` o no hay partidos hoy.  
+**Solución:** `python scripts/sync_today.py`
+
+---
+
 ## Notas de seguridad
 
 - El archivo `.env` está en `.gitignore` — nunca lo subas al repo
 - Usa la `service_role` key de Supabase, no la `anon` key
 - El acceso al bot es exclusivo: solo `TELEGRAM_ALLOWED_USER_ID` puede usarlo
-- Los logs no imprimen keys ni tokens
-
----
-
-## Limitaciones del plan gratuito de API-Football
-
-- 100 requests/día
-- Cada `sync_today.py` consume: 1 req (fixtures) + 1 req por fixture (odds) + 1 req (/status en check)
-- Con 5 ligas y 4 fixtures cada una: ~20 requests por sync
-- Suficiente para 1 sync diario con varias ligas
+- Los logs nunca imprimen keys ni tokens en claro (siempre enmascarados)
 
 ---
 
