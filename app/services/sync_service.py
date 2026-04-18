@@ -2,13 +2,19 @@
 
 Phase A  reference sync   — bookmakers, bet types, timezone validation
 Phase B  bootstrap sync   — league coverage metadata (run once per season)
-Phase C  daily sync       — fixtures + context + odds (coverage-first)
+Phase C  daily sync       — fixtures + context + odds (coverage-first, tier-aware)
 Phase D  prematch sync    — lineups + odds refresh near kickoff
 
 Coverage-first principle:
   Before calling standings, injuries, predictions, or odds, the service reads
-  the stored leagues.coverage. If a flag is false the call is skipped and a
-  debug trace is logged so every omission is auditable.
+  the stored competition_seasons.coverage. If a flag is false the call is
+  skipped and a debug trace is logged so every omission is auditable.
+
+Tier-aware sync (Phase C):
+  tier_1_daily    — full enrichment on every run
+  tier_2_matchday — full enrichment but standings only when fixtures exist
+  tier_3_light    — fixtures + odds only; no standings, team stats, injuries,
+                    or provider predictions (saves requests for minor leagues)
 """
 
 import logging
@@ -17,9 +23,9 @@ from zoneinfo import ZoneInfo
 
 from app.core.config import settings
 from app.data.api_football import endpoints, coverage as cov_helper
+from app.data.api_football.client import APIFootballError
 from app.data.repositories import fixture_repo, odds_repo
 from app.data.repositories import reference_repo, sync_runs_repo
-from app.data.repositories.supabase_client import get_supabase
 
 logger = logging.getLogger(__name__)
 
@@ -33,24 +39,20 @@ class SyncService:
         """Phase A: populate ref_bookmakers and ref_bet_types, validate timezone.
 
         Safe to run repeatedly — all upserts are idempotent.
-        This phase does NOT depend on any specific league or season.
         """
         run_id = sync_runs_repo.start_sync_run("reference")
         api_calls = 0
         try:
-            # Validate configured timezone
             tz = settings.default_timezone
             valid = await endpoints.validate_timezone(tz)
             api_calls += 1
             if not valid:
-                logger.warning("Timezone '%s' no válida para API-Football — revisa DEFAULT_TIMEZONE", tz)
+                logger.warning("Timezone '%s' no válida para API-Football", tz)
 
-            # Bookmakers
             bookmakers = await endpoints.fetch_bookmakers()
             api_calls += 1
             n_bk = reference_repo.upsert_bookmakers(bookmakers)
 
-            # Bet types (prematch only — never mix with live bet IDs)
             bet_types = await endpoints.fetch_bet_types()
             api_calls += 1
             n_bt = reference_repo.upsert_bet_types(bet_types, scope="prematch")
@@ -61,7 +63,6 @@ class SyncService:
                 "bet_types_saved": n_bt,
             }
             logger.info("Phase A completada: %s", summary)
-
             self._save_usage_snapshot(run_id, "/odds/bookmakers")
             sync_runs_repo.finish_sync_run(
                 run_id,
@@ -80,23 +81,99 @@ class SyncService:
 
     # ── Phase B: League coverage bootstrap ───────────────────────────────────
 
-    async def sync_bootstrap(self, league_seasons: dict[int, int]) -> dict:
+    async def sync_bootstrap(self, league_seasons: dict[int, int] | None = None) -> dict:
         """Phase B: fetch league metadata + coverage from /leagues.
 
-        Stores coverage in leagues.coverage so Phase C can skip unavailable endpoints.
-        Run once per season, or whenever you add a new league.
+        Stores coverage in competition_seasons.coverage so Phase C can skip
+        unavailable endpoints. Run once per season or when adding new leagues.
+
+        Season resolution order (highest to lowest priority):
+          1. Explicit league_seasons argument.
+          2. LEAGUE_SEASONS from settings (.env), applied as overrides.
+          3. Auto-discovery via /leagues?current=true filtered to DEFAULT_LEAGUE_IDS.
         """
+        effective: dict[int, int] = {}
+
+        if league_seasons:
+            effective = dict(league_seasons)
+        else:
+            league_ids = settings.league_ids_list or None
+            if not league_ids:
+                logger.error(
+                    "Phase B: no hay ligas configuradas. "
+                    "Configura DEFAULT_LEAGUE_IDS en .env o usa --leagues 39:2025,...",
+                )
+                return {"leagues_updated": 0, "leagues_skipped": 0, "error": "no_league_ids"}
+
+            logger.info(
+                "Phase B: auto-descubriendo temporadas via /leagues?current=true | ligas=%s",
+                league_ids,
+            )
+            try:
+                discovered = await endpoints.fetch_active_leagues(league_ids)
+                for entry in discovered:
+                    effective[entry["league_id"]] = entry["season"]
+                logger.info("Phase B: %d ligas descubiertas: %s", len(effective), effective)
+            except APIFootballError as exc:
+                logger.warning("Phase B: auto-discovery falló: %s", exc)
+            except Exception as exc:
+                logger.warning("Phase B: auto-discovery falló inesperadamente: %s", exc)
+
+            # Apply LEAGUE_SEASONS overrides from .env
+            for lid, season_override in settings.league_seasons_map.items():
+                if lid in effective and effective[lid] != season_override:
+                    logger.info(
+                        "Phase B: override season liga=%s: %s → %s",
+                        lid, effective[lid], season_override,
+                    )
+                effective[lid] = season_override
+
+            if not effective:
+                logger.error(
+                    "Phase B: no se pudo resolver ninguna temporada. "
+                    "Configura LEAGUE_SEASONS en .env o verifica DEFAULT_LEAGUE_IDS.",
+                )
+                return {"leagues_updated": 0, "leagues_skipped": 0, "error": "no_seasons_resolved"}
+
         run_id = sync_runs_repo.start_sync_run("bootstrap")
         api_calls = 0
         updated = 0
+        skipped = 0
         try:
-            for league_id, season in league_seasons.items():
-                meta = await endpoints.fetch_league_coverage(league_id, season)
-                api_calls += 1
+            for league_id, season in effective.items():
+                try:
+                    meta = await endpoints.fetch_league_coverage(league_id, season)
+                    api_calls += 1
+                except APIFootballError as exc:
+                    api_calls += 1
+                    error_text = str(exc).lower()
+                    if "free plan" in error_text or "free plans" in error_text:
+                        logger.warning(
+                            "Phase B: liga=%s season=%s — plan gratuito no permite esta temporada. "
+                            "Error: %s",
+                            league_id, season, exc,
+                        )
+                    else:
+                        logger.warning(
+                            "Phase B: liga=%s season=%s — error de API: %s — continuando",
+                            league_id, season, exc,
+                        )
+                    skipped += 1
+                    continue
+                except Exception as exc:
+                    api_calls += 1
+                    logger.warning(
+                        "Phase B: liga=%s season=%s — error inesperado: %s — continuando",
+                        league_id, season, exc,
+                    )
+                    skipped += 1
+                    continue
+
                 if not meta:
                     logger.warning(
-                        "Phase B: no hay datos para league=%s season=%s", league_id, season
+                        "Phase B: sin datos para league=%s season=%s", league_id, season
                     )
+                    skipped += 1
                     continue
 
                 fixture_repo.upsert_league(
@@ -112,21 +189,29 @@ class SyncService:
                 )
                 updated += 1
                 logger.info(
-                    "Phase B: league=%s season=%s coverage guardada (standings=%s, injuries=%s, predictions=%s)",
+                    "Phase B: league=%s season=%s → coverage guardada "
+                    "(standings=%s injuries=%s predictions=%s odds=%s)",
                     league_id, season,
                     meta.get("coverage", {}).get("standings"),
                     meta.get("coverage", {}).get("injuries"),
                     meta.get("coverage", {}).get("predictions"),
+                    meta.get("coverage", {}).get("odds"),
                 )
 
-            summary = {"leagues_updated": updated}
+            summary = {
+                "leagues_resolved": len(effective),
+                "leagues_updated": updated,
+                "leagues_skipped": skipped,
+            }
+            final_status = "completed" if updated > 0 else "completed_with_warnings"
             sync_runs_repo.finish_sync_run(
                 run_id,
-                status="completed",
+                status=final_status,
                 leagues_synced=updated,
                 api_calls_made=api_calls,
                 summary_json=summary,
             )
+            logger.info("Phase B completada: %s", summary)
             return summary
 
         except Exception as exc:
@@ -140,24 +225,64 @@ class SyncService:
 
     async def sync_daily(
         self,
-        league_seasons: dict[int, int],
+        league_seasons: dict[int, int] | None = None,
         timezone: str | None = None,
     ) -> dict:
         """Phase C: sync today's fixtures + context + odds.
 
-        For each league:
-          1. Read coverage from DB.
-          2. Fetch standings once (coverage-first).
-          3. Fetch fixtures for today.
-          4. Per fixture: upsert league/team/fixture, build context blob, fetch odds.
+        League source (priority order):
+          1. Explicit league_seasons argument (from --leagues CLI flag).
+          2. tracked_competitions WHERE is_active=True (primary config source).
+          3. competition_seasons WHERE current=True (legacy fallback).
 
-        Args:
-            league_seasons: {league_id: season_year}
-            timezone: IANA timezone override (defaults to settings.default_timezone).
+        Tier behaviour per league:
+          tier_1_daily    — standings + full enrichment always
+          tier_2_matchday — same as tier_1 but standings only when fixtures present
+          tier_3_light    — fixtures + odds only (no standings/stats/injuries/predictions)
 
         Returns:
             Summary dict with counts by league.
         """
+        # ── Resolve which leagues to sync ────────────────────────────────────
+        if league_seasons:
+            # Explicit CLI override — treat all as tier_1
+            tracked: dict[int, dict] = {
+                lid: {"season": s, "sync_tier": "tier_1_daily"}
+                for lid, s in league_seasons.items()
+            }
+            logger.info("Phase C: leagues explícitas=%s", list(tracked.keys()))
+        else:
+            tracked = fixture_repo.get_tracked_league_seasons()
+            if not tracked:
+                # Legacy fallback: read from competition_seasons.current=True
+                logger.warning(
+                    "Phase C: tracked_competitions vacío — "
+                    "usando competition_seasons.current=True como fallback. "
+                    "Ejecuta el seed: sql/seed_tracked_competitions.sql"
+                )
+                old_map = fixture_repo.get_active_league_seasons(
+                    settings.league_ids_list or None
+                )
+                tracked = {
+                    lid: {"season": s, "sync_tier": "tier_1_daily"}
+                    for lid, s in old_map.items()
+                }
+            if not tracked:
+                logger.error(
+                    "Phase C: sin ligas activas. "
+                    "Ejecuta Phase B y el seed de tracked_competitions."
+                )
+                return {"error": "no_active_leagues", "fixtures_synced": 0, "odds_rows_synced": 0}
+
+            # Apply LEAGUE_SEASONS overrides from .env (season only, keep tier)
+            for lid, season_override in settings.league_seasons_map.items():
+                if lid in tracked:
+                    tracked[lid] = {**tracked[lid], "season": season_override}
+
+            logger.info(
+                "Phase C: %d ligas activas en tracked_competitions", len(tracked)
+            )
+
         tz_name = timezone or settings.default_timezone
         tz = ZoneInfo(tz_name)
         today_str = datetime.now(tz).strftime("%Y-%m-%d")
@@ -170,31 +295,28 @@ class SyncService:
         total_odds = 0
 
         logger.info(
-            "=== Phase C — Sync diario | fecha=%s | timezone=%s | ligas=%s ===",
-            today_str, tz_name, list(league_seasons.keys()),
+            "=== Phase C — Sync diario | fecha=%s | timezone=%s | ligas=%d ===",
+            today_str, tz_name, len(tracked),
         )
 
         league_results: dict[int, dict] = {}
 
         try:
-            for league_id, season in league_seasons.items():
+            for league_id, meta in tracked.items():
+                season: int = meta["season"]
+                sync_tier: str = meta.get("sync_tier", "tier_1_daily")
+
                 # Read coverage from DB (populated during Phase B)
                 coverage = fixture_repo.get_league_coverage(league_id, season)
-
-                # Fetch standings once per league (saves API calls)
-                standings_data: list[dict] = []
-                if cov_helper.check(coverage, "standings", league_id):
-                    try:
-                        standings_data = await endpoints.fetch_standings(league_id, season)
-                        api_calls += 1
-                    except Exception:
-                        logger.warning("standings falló para league=%s — continuando sin él", league_id)
-                else:
-                    logger.debug(
-                        "coverage.standings=false para league=%s season=%s — omitido", league_id, season
+                if coverage is None:
+                    logger.warning(
+                        "Phase C: liga=%s season=%s sin coverage en BD — "
+                        "ejecuta Phase B primero. Continuando sin coverage.",
+                        league_id, season,
                     )
+                    coverage = {}
 
-                # Fetch fixtures for today
+                # Fetch today's fixtures first (always — needed to know if game exists)
                 try:
                     raw_fixtures = await endpoints.fetch_fixtures(
                         today_str, league_id, season, timezone=tz_name
@@ -202,8 +324,33 @@ class SyncService:
                     api_calls += 1
                 except Exception:
                     logger.exception("Error fetching fixtures league=%s", league_id)
-                    league_results[league_id] = {"season": season, "fixtures": 0, "odds_rows": 0, "error": True}
+                    league_results[league_id] = {
+                        "season": season, "tier": sync_tier,
+                        "fixtures": 0, "odds_rows": 0, "error": True,
+                    }
                     continue
+
+                # tier_2_matchday: skip standings if no fixtures today
+                # tier_1_daily: fetch standings regardless (context for upcoming fixtures)
+                # tier_3_light: never fetch standings
+                standings_data: list[dict] = []
+                should_fetch_standings = (
+                    sync_tier != "tier_3_light"
+                    and (sync_tier == "tier_1_daily" or len(raw_fixtures) > 0)
+                    and cov_helper.check(coverage, "standings", league_id)
+                )
+                if should_fetch_standings:
+                    try:
+                        standings_data = await endpoints.fetch_standings(league_id, season)
+                        api_calls += 1
+                    except Exception:
+                        logger.warning(
+                            "standings falló para league=%s — continuando sin él", league_id
+                        )
+                elif sync_tier == "tier_3_light":
+                    logger.debug(
+                        "tier_3_light: standings omitidos para league=%s", league_id
+                    )
 
                 league_fix = 0
                 league_odds = 0
@@ -217,20 +364,22 @@ class SyncService:
                         standings_data=standings_data,
                         markets=markets,
                         preferred_bk_id=preferred_bk_id,
+                        sync_tier=sync_tier,
                     )
                     if result is None:
                         continue
-                    internal_id, odds_count, calls = result
+                    _, odds_count, calls = result
                     api_calls += calls
                     league_fix += 1
                     league_odds += odds_count
 
                 logger.info(
-                    "Phase C — league=%s season=%s → %d fixtures, %d cuotas",
-                    league_id, season, league_fix, league_odds,
+                    "Phase C — league=%s season=%s tier=%s → %d fixtures, %d cuotas",
+                    league_id, season, sync_tier, league_fix, league_odds,
                 )
                 league_results[league_id] = {
                     "season": season,
+                    "tier": sync_tier,
                     "fixtures": league_fix,
                     "odds_rows": league_odds,
                 }
@@ -240,18 +389,17 @@ class SyncService:
             summary = {
                 "date": today_str,
                 "timezone": tz_name,
-                "leagues_synced": len(league_seasons),
+                "leagues_synced": len(tracked),
                 "fixtures_synced": total_fixtures,
                 "odds_rows_synced": total_odds,
                 "by_league": league_results,
             }
             logger.info("Phase C completada: %s", summary)
-
             self._save_usage_snapshot(run_id, "/fixtures")
             sync_runs_repo.finish_sync_run(
                 run_id,
                 status="completed",
-                leagues_synced=len(league_seasons),
+                leagues_synced=len(tracked),
                 fixtures_synced=total_fixtures,
                 odds_rows_synced=total_odds,
                 api_calls_made=api_calls,
@@ -273,15 +421,7 @@ class SyncService:
     # ── Phase D: Prematch sync (near kickoff) ─────────────────────────────────
 
     async def sync_prematch(self, fixture_ids: list[int]) -> dict:
-        """Phase D: refresh odds and fetch lineups for fixtures near kickoff.
-
-        Args:
-            fixture_ids: Internal Supabase fixture IDs (filtered by kickoff window
-                         in the calling script — e.g. kicking off within 2 hours).
-
-        Returns:
-            Summary dict with counts.
-        """
+        """Phase D: refresh odds and fetch lineups for fixtures near kickoff."""
         if not fixture_ids:
             logger.info("Phase D: no hay fixtures candidatos para prematch sync")
             return {"fixtures": 0, "odds_refreshed": 0, "lineups_fetched": 0}
@@ -301,14 +441,12 @@ class SyncService:
                 provider_fix_id: int = fix["provider_fixture_id"]
                 league_internal_id: int = fix["league_id"]
 
-                # Get coverage for this fixture's league
-                # (we need provider_league_id — query leagues table)
-                league_result = get_supabase().table("leagues").select("provider_league_id, season, coverage").eq("id", league_internal_id).limit(1).execute()
-                league_row = league_result.data[0] if league_result.data else {}
-                coverage = league_row.get("coverage") or {}
+                league_row = fixture_repo.get_competition_season_by_id(league_internal_id)
+                coverage = (league_row or {}).get("coverage") or {}
+                provider_lid = (league_row or {}).get("provider_league_id", 0)
 
                 # Refresh odds
-                if cov_helper.check(coverage, "odds", league_row.get("provider_league_id", 0)):
+                if cov_helper.check(coverage, "odds", provider_lid):
                     try:
                         odds_rows = await endpoints.fetch_odds(provider_fix_id, markets)
                         api_calls += 1
@@ -318,16 +456,16 @@ class SyncService:
                         logger.exception("Error refreshing odds fixture=%s", provider_fix_id)
                 else:
                     logger.debug(
-                        "coverage.odds=false para fixture=%s — odds refresh omitido", provider_fix_id
+                        "coverage.odds=false para fixture=%s — odds refresh omitido",
+                        provider_fix_id,
                     )
 
-                # Fetch lineups (if coverage allows)
-                if cov_helper.check_lineups(coverage, league_row.get("provider_league_id", 0), provider_fix_id):
+                # Fetch lineups
+                if cov_helper.check_lineups(coverage, provider_lid, provider_fix_id):
                     try:
                         lineups = await endpoints.fetch_lineups(provider_fix_id)
                         api_calls += 1
                         if lineups:
-                            # Store lineups in context_json (merge with existing)
                             existing_ctx = fix.get("context_json") or {}
                             existing_ctx["lineups"] = lineups
                             fixture_repo.update_fixture_context(fix_id, existing_ctx)
@@ -370,6 +508,7 @@ class SyncService:
         standings_data: list[dict],
         markets: list[str],
         preferred_bk_id: int | None,
+        sync_tier: str = "tier_1_daily",
     ) -> tuple[int, int, int] | None:
         """Upsert one fixture item and fetch its context + odds.
 
@@ -383,7 +522,7 @@ class SyncService:
             teams = item["teams"]
             provider_fix_id: int = fix["id"]
 
-            # Upsert league + teams + fixture
+            # Upsert league (competition + competition_season) and teams
             league_row = fixture_repo.upsert_league(
                 provider_league_id=league_data["id"],
                 name=league_data["name"],
@@ -405,6 +544,8 @@ class SyncService:
                 logger.warning("Upsert sin ID para fixture provider=%s", provider_fix_id)
                 return None
 
+            # Note: venue_id is intentionally not stored — it would require upserting
+            # the venues table first. venue is non-critical for predictions.
             fixture_row = fixture_repo.upsert_fixture(
                 provider_fixture_id=provider_fix_id,
                 league_id=league_row["id"],
@@ -417,13 +558,12 @@ class SyncService:
                 status_short=fix["status"].get("short"),
                 status_long=fix["status"].get("long"),
                 elapsed=fix["status"].get("elapsed"),
-                venue_id=fix.get("venue", {}).get("id"),
             )
             internal_id: int = fixture_row.get("id")
             if not internal_id:
                 return None
 
-            # Build and store context blob
+            # Build and store context blob (tier-aware)
             context = await self._build_context(
                 item=item,
                 league_id=league_id,
@@ -434,11 +574,12 @@ class SyncService:
                 away_team_id=away_row["id"],
                 home_provider_id=teams["home"]["id"],
                 away_provider_id=teams["away"]["id"],
+                sync_tier=sync_tier,
             )
             api_calls += context.pop("_api_calls", 0)
             fixture_repo.update_fixture_context(internal_id, context)
 
-            # Fetch and upsert odds (coverage-first)
+            # Fetch and upsert odds (coverage-first, all tiers)
             odds_count = 0
             if cov_helper.check(coverage, "odds", league_id, str(provider_fix_id)):
                 try:
@@ -451,14 +592,17 @@ class SyncService:
                     logger.exception("Error fetching odds fixture=%s", provider_fix_id)
             else:
                 logger.debug(
-                    "coverage.odds=false para league=%s — odds omitidos para fixture=%s",
+                    "coverage.odds=false para league=%s fixture=%s — odds omitidos",
                     league_id, provider_fix_id,
                 )
 
             return internal_id, odds_count, api_calls
 
         except (KeyError, TypeError, ValueError):
-            logger.exception("Error parseando fixture item: %s", item.get("fixture", {}).get("id"))
+            logger.exception(
+                "Error parseando fixture item: %s",
+                item.get("fixture", {}).get("id"),
+            )
             return None
 
     async def _build_context(
@@ -472,11 +616,14 @@ class SyncService:
         away_team_id: int,
         home_provider_id: int,
         away_provider_id: int,
+        sync_tier: str = "tier_1_daily",
     ) -> dict:
         """Build the context_json blob for a fixture.
 
-        Returns a dict ready to store in fixtures.context_json.
+        Returns a dict ready to store in fixture_contexts.context_json.
         Includes a special "_api_calls" key (popped by the caller).
+
+        For tier_3_light, returns immediately with minimal data (no API calls).
         """
         context: dict = {
             "home_team_provider_id": home_provider_id,
@@ -485,7 +632,14 @@ class SyncService:
         }
         provider_fix_id: int = item["fixture"]["id"]
 
-        # Standing for each team (from already-fetched standings)
+        # tier_3_light: skip all enrichment — fixtures + odds only
+        if sync_tier == "tier_3_light":
+            logger.debug(
+                "tier_3_light: enrichment omitido para fixture=%s", provider_fix_id
+            )
+            return context
+
+        # Standings (pre-fetched once per league — just look up each team)
         if standings_data:
             context["home_standing"] = _find_standing(standings_data, home_provider_id)
             context["away_standing"] = _find_standing(standings_data, away_provider_id)
@@ -493,18 +647,25 @@ class SyncService:
         # Team statistics (coverage-first)
         if cov_helper.check_fixture_stats(coverage, league_id):
             try:
-                home_stats = await endpoints.fetch_team_statistics(home_provider_id, league_id, season)
-                away_stats = await endpoints.fetch_team_statistics(away_provider_id, league_id, season)
+                home_stats = await endpoints.fetch_team_statistics(
+                    home_provider_id, league_id, season
+                )
+                away_stats = await endpoints.fetch_team_statistics(
+                    away_provider_id, league_id, season
+                )
                 context["_api_calls"] += 2
                 if home_stats:
                     context["home_stats"] = home_stats
                 if away_stats:
                     context["away_stats"] = away_stats
             except Exception:
-                logger.warning("team_statistics falló para fixture=%s — continuando", provider_fix_id)
+                logger.warning(
+                    "team_statistics falló para fixture=%s — continuando", provider_fix_id
+                )
         else:
             logger.debug(
-                "coverage.fixtures.statistics_fixtures=false para league=%s — team_stats omitidos (fixture=%s)",
+                "coverage.fixtures.statistics_fixtures=false para league=%s — "
+                "team_stats omitidos (fixture=%s)",
                 league_id, provider_fix_id,
             )
 
@@ -515,10 +676,12 @@ class SyncService:
                 context["_api_calls"] += 1
                 context["injuries"] = injuries
             except Exception:
-                logger.warning("injuries falló para fixture=%s — continuando", provider_fix_id)
+                logger.warning(
+                    "injuries falló para fixture=%s — continuando", provider_fix_id
+                )
         else:
             logger.debug(
-                "coverage.injuries=false para league=%s — injuries omitidos (fixture=%s)",
+                "coverage.injuries=false para league=%s fixture=%s — injuries omitidos",
                 league_id, provider_fix_id,
             )
 
@@ -530,29 +693,23 @@ class SyncService:
                 if pred:
                     context["provider_prediction"] = pred
             except Exception:
-                logger.warning("provider predictions falló para fixture=%s — continuando", provider_fix_id)
+                logger.warning(
+                    "provider predictions falló para fixture=%s — continuando",
+                    provider_fix_id,
+                )
         else:
             logger.debug(
-                "coverage.predictions=false para league=%s — provider predictions omitidos (fixture=%s)",
+                "coverage.predictions=false para league=%s fixture=%s — "
+                "provider predictions omitidos",
                 league_id, provider_fix_id,
             )
 
-        # H2H from DB (no API call needed — uses already-stored fixtures)
+        # H2H from DB (no API call — uses stored fixtures)
         h2h = fixture_repo.get_h2h_fixtures(home_team_id, away_team_id, limit=5)
         if h2h:
             context["h2h"] = h2h
 
         return context
-
-    # ── Internal: compatibility shim ─────────────────────────────────────────
-
-    async def sync_today(
-        self,
-        league_seasons: dict[int, int],
-        timezone: str | None = None,
-    ) -> dict:
-        """Alias for sync_daily — kept for backwards compatibility with sync_today.py."""
-        return await self.sync_daily(league_seasons, timezone=timezone)
 
     # ── Utility ───────────────────────────────────────────────────────────────
 

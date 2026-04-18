@@ -13,10 +13,10 @@ def upsert_odds_batch(fixture_id: int, rows: list[dict]) -> int:
 
     Args:
         fixture_id: Internal Supabase fixture ID.
-        rows: List of dicts with keys ``bookmaker_id``, ``bookmaker_name``,
-              ``bet_id``, ``market``, ``selection``, ``odd`` (as returned by
-              ``endpoints.fetch_odds``). Older dicts without ``bookmaker_id``
-              / ``bet_id`` are still accepted (those fields default to NULL).
+        rows: List of dicts as returned by ``endpoints.fetch_odds()``.
+              Required keys: ``bookmaker_name`` (or ``bookmaker``), ``market``
+              (canonical code: '1X2', 'OU25', 'BTTS'), ``selection``, ``odd``.
+              Optional: ``bookmaker_id``, ``bet_id``, ``scope``.
 
     Returns:
         Number of rows upserted.
@@ -28,12 +28,12 @@ def upsert_odds_batch(fixture_id: int, rows: list[dict]) -> int:
     payload = [
         {
             "fixture_id": fixture_id,
-            "bookmaker": r.get("bookmaker_name", r.get("bookmaker", "Unknown")),
-            "market": r["market"],
-            "selection": r["selection"],
-            "odd": r["odd"],
+            "bookmaker_name": r.get("bookmaker_name", r.get("bookmaker", "Unknown")),
             "bookmaker_id": r.get("bookmaker_id"),
             "bet_id": r.get("bet_id"),
+            "market_key": r["market"],   # endpoints.fetch_odds returns canonical code
+            "selection": r["selection"],
+            "odd": r["odd"],
             "scope": r.get("scope", "prematch"),
             "last_update": now,
         }
@@ -43,7 +43,7 @@ def upsert_odds_batch(fixture_id: int, rows: list[dict]) -> int:
     client = get_supabase()
     client.table("odds_snapshots").upsert(
         payload,
-        on_conflict="fixture_id,bookmaker,market,selection",
+        on_conflict="fixture_id,bookmaker_name,market_key,selection,scope",
     ).execute()
     logger.debug("upsert_odds_batch fixture_id=%s → %d filas", fixture_id, len(payload))
     return len(payload)
@@ -63,15 +63,15 @@ def get_odds_for_fixture(fixture_id: int) -> list[dict]:
 
 
 def get_best_odds_for_fixture(
-    fixture_id: int, market: str, selection: str
+    fixture_id: int, market_key: str, selection: str
 ) -> dict | None:
-    """Return the single row with the highest odd for a market/selection pair."""
+    """Return the single row with the highest odd for a market_key/selection pair."""
     client = get_supabase()
     result = (
         client.table("odds_snapshots")
-        .select("bookmaker, odd, bookmaker_id")
+        .select("bookmaker_name, odd, bookmaker_id")
         .eq("fixture_id", fixture_id)
-        .eq("market", market)
+        .eq("market_key", market_key)
         .eq("selection", selection)
         .eq("scope", "prematch")
         .order("odd", desc=True)

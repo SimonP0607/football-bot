@@ -99,8 +99,8 @@ def format_picks(
         league = league_names.get(fix["league_id"], "")
         kickoff = _kickoff_str(fix["kickoff_at"])
 
-        market_lbl = _market_label(pred["market"])
-        pick_lbl = _selection_label(pred["market"], pred["recommended_pick"])
+        market_lbl = _market_label(pred["market_key"])
+        pick_lbl = _selection_label(pred["market_key"], pred["selection"])
         edge = pred["edge"]
         icon = _edge_icon(edge)
         arg = pred.get("argument_json") or {}
@@ -179,7 +179,7 @@ def format_partido(
     markets_order = ["1X2", "OU25", "BTTS"]
     by_market: dict[str, list[dict]] = {}
     for c in candidates:
-        by_market.setdefault(c["market"], []).append(c)
+        by_market.setdefault(c["market_key"], []).append(c)
 
     best_picks: list[dict] = []  # selections with positive edge
 
@@ -252,7 +252,7 @@ def format_partido(
         # Sort by edge
         best_picks.sort(key=lambda x: x["edge"], reverse=True)
         bp = best_picks[0]
-        mkt = bp["market"]
+        mkt = bp["market_key"]
         sel = bp["selection"]
         lines.append(
             f"💡 <b>PICK RECOMENDADO:</b> "
@@ -369,10 +369,8 @@ def format_estado(
         missing = "  ".join(schema.missing_tables)
         lines.append(f"   └ Faltantes: <code>{missing}</code>")
         lines.append("")
-        lines.append("<b>Aplica las migraciones en Supabase → SQL Editor:</b>")
-        lines.append("  <code>sql/migrations/001_init.sql</code>")
-        lines.append("  <code>sql/migrations/002_constraints_and_indexes.sql</code>")
-        lines.append("  <code>sql/migrations/003_api_football_v2.sql</code>")
+        lines.append("<b>Aplica la migración en Supabase → SQL Editor:</b>")
+        lines.append("  <code>sql/migrations/010_production_schema.sql</code>")
         return "\n".join(lines)
 
     # ── Data counts ────────────────────────────────────────────────────────────

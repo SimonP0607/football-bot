@@ -80,7 +80,7 @@ class PredictionService:
                 prediction_repo.save_prediction(
                     fixture_id=candidate.fixture_id,
                     market=candidate.market,
-                    recommended_pick=candidate.selection,
+                    selection=candidate.selection,
                     model_probability=candidate.model_probability,
                     implied_probability=candidate.implied_probability,
                     edge=candidate.edge,
@@ -187,7 +187,7 @@ class PredictionService:
         return [
             {
                 "fixture_id": c.fixture_id,
-                "market": c.market,
+                "market_key": c.market,
                 "selection": c.selection,
                 "model_probability": c.model_probability,
                 "implied_probability": c.implied_probability,

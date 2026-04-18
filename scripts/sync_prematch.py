@@ -20,7 +20,17 @@ from zoneinfo import ZoneInfo
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.core.logger import setup_logger
+try:
+    from app.core.logger import setup_logger
+except ImportError as _e:
+    print(
+        f"Error de importación: {_e}\n"
+        "Asegúrate de activar el entorno virtual antes de ejecutar este script:\n"
+        "  Windows:       .venv\\Scripts\\activate\n"
+        "  macOS/Linux:   source .venv/bin/activate\n"
+        "  o ejecuta directamente: .venv/Scripts/python.exe scripts/sync_prematch.py"
+    )
+    sys.exit(1)
 from app.core.config import settings
 from app.services.sync_service import sync_service
 from app.services.prediction_service import prediction_service
@@ -113,7 +123,13 @@ if __name__ == "__main__":
     if args.fixture:
         fix = get_fixture_by_provider_id(args.fixture)
         if not fix:
-            print(f"Error: fixture {args.fixture} no encontrado en la base de datos.")
+            print(
+                f"Error: fixture {args.fixture} no encontrado en la base de datos.\n"
+                "Asegúrate de haber ejecutado el sync diario primero:\n"
+                "  python scripts/sync_reference.py --phase ab --leagues <liga>:<season>\n"
+                "  python scripts/sync_today.py\n"
+                "El ID de fixture debe ser el provider_fixture_id de API-Football."
+            )
             sys.exit(1)
         fixture_ids = [fix["id"]]
         logger.info("Modo fixture único: provider_id=%s → internal_id=%s", args.fixture, fix["id"])

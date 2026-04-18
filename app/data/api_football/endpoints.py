@@ -118,6 +118,63 @@ async def fetch_league_coverage(league_id: int, season: int) -> dict | None:
     return None
 
 
+async def fetch_active_leagues(league_ids: list[int] | None = None) -> list[dict]:
+    """Discover currently-running leagues and their active season via /leagues?current=true.
+
+    Makes a single API call that returns all globally-active leagues, then
+    filters client-side to the given league_ids if provided.
+
+    Args:
+        league_ids: If provided, only return leagues whose provider ID is in this list.
+                    Pass None to return all currently-active leagues.
+
+    Returns:
+        List of dicts, one per active league:
+            {league_id, name, country, type, season, season_start, season_end,
+             current, coverage}
+        Only leagues with a season entry where current=true are included.
+    """
+    data = await api_client.get("/leagues", params={"current": "true"})
+    response: list[dict] = data.get("response", [])
+
+    filter_set: set[int] | None = set(league_ids) if league_ids else None
+    result: list[dict] = []
+
+    for entry in response:
+        league_info = entry.get("league", {})
+        country_info = entry.get("country", {})
+        league_id: int = league_info.get("id", 0)
+
+        if filter_set and league_id not in filter_set:
+            continue
+
+        # Find the entry marked current=true in this league's seasons list
+        seasons: list[dict] = entry.get("seasons", [])
+        current_season = next((s for s in seasons if s.get("current")), None)
+        if not current_season:
+            logger.debug("Liga %s sin entrada current=true en /leagues — omitida", league_id)
+            continue
+
+        result.append({
+            "league_id": league_id,
+            "name": league_info.get("name"),
+            "country": country_info.get("name"),
+            "type": league_info.get("type"),
+            "season": current_season.get("year"),
+            "season_start": current_season.get("start"),
+            "season_end": current_season.get("end"),
+            "current": True,
+            "coverage": current_season.get("coverage", {}),
+        })
+
+    logger.info(
+        "Ligas activas via /leagues?current=true: %d%s",
+        len(result),
+        f" (de {len(response)} totales, filtradas a IDs solicitados)" if filter_set else "",
+    )
+    return result
+
+
 # ── Phase C: Fixtures ─────────────────────────────────────────────────────────
 
 

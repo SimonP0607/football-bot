@@ -17,8 +17,8 @@ FIXTURE = {
 PREDICTION = {
     "id": 1,
     "fixture_id": 1,
-    "market": "1X2",
-    "recommended_pick": "Home",
+    "market_key": "1X2",
+    "selection": "Home",
     "model_probability": 0.65,
     "implied_probability": 0.476,
     "edge": 0.174,
@@ -70,7 +70,7 @@ def test_single_pick_contains_bookmaker():
 
 
 def test_multiple_picks_separated():
-    pred2 = {**PREDICTION, "id": 2, "recommended_pick": "Away"}
+    pred2 = {**PREDICTION, "id": 2, "selection": "Away"}
     result = format_picks([PREDICTION, pred2], [FIXTURE], TEAM_NAMES, LEAGUE_NAMES)
     assert result.count("Real Madrid") == 2
 
@@ -121,7 +121,7 @@ def test_format_estado_schema_not_initialized():
     assert "fixtures" in result
     assert "predictions" in result
     # Migration hint should appear
-    assert "001_init.sql" in result
+    assert "010_production_schema.sql" in result
 
 
 def test_format_estado_counts_none_shows_error_row():

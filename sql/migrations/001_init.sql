@@ -1,77 +1,79 @@
-create table if not exists bot_users (
-    id bigint generated always as identity primary key,
-    telegram_user_id bigint not null unique,
-    username text,
-    is_active boolean not null default true,
-    is_admin boolean not null default false,
-    created_at timestamptz not null default now()
+-- 001: schema base (superseded by 010 en instalaciones nuevas)
+
+CREATE TABLE IF NOT EXISTS bot_users (
+    id               BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    telegram_user_id BIGINT      NOT NULL UNIQUE,
+    username         TEXT,
+    is_active        BOOLEAN     NOT NULL DEFAULT true,
+    is_admin         BOOLEAN     NOT NULL DEFAULT false,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-create table if not exists leagues (
-    id bigint generated always as identity primary key,
-    provider_league_id bigint not null,
-    name text not null,
-    country text,
-    season integer,
-    is_active boolean not null default true,
-    created_at timestamptz not null default now()
+CREATE TABLE IF NOT EXISTS leagues (
+    id                 BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    provider_league_id BIGINT      NOT NULL,
+    name               TEXT        NOT NULL,
+    country            TEXT,
+    season             INTEGER,
+    is_active          BOOLEAN     NOT NULL DEFAULT true,
+    created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-create table if not exists teams (
-    id bigint generated always as identity primary key,
-    provider_team_id bigint not null,
-    name text not null,
-    country text,
-    created_at timestamptz not null default now()
+CREATE TABLE IF NOT EXISTS teams (
+    id               BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    provider_team_id BIGINT      NOT NULL,
+    name             TEXT        NOT NULL,
+    country          TEXT,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-create table if not exists fixtures (
-    id bigint generated always as identity primary key,
-    provider_fixture_id bigint not null unique,
-    league_id bigint references leagues(id),
-    home_team_id bigint references teams(id),
-    away_team_id bigint references teams(id),
-    kickoff_at timestamptz not null,
-    status text,
-    created_at timestamptz not null default now()
+CREATE TABLE IF NOT EXISTS fixtures (
+    id                  BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    provider_fixture_id BIGINT      NOT NULL UNIQUE,
+    league_id           BIGINT      REFERENCES leagues(id),
+    home_team_id        BIGINT      REFERENCES teams(id),
+    away_team_id        BIGINT      REFERENCES teams(id),
+    kickoff_at          TIMESTAMPTZ NOT NULL,
+    status              TEXT,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-create table if not exists odds_snapshots (
-    id bigint generated always as identity primary key,
-    fixture_id bigint references fixtures(id),
-    bookmaker text not null,
-    market text not null,
-    selection text not null,
-    odd numeric(10,4) not null,
-    captured_at timestamptz not null default now()
+CREATE TABLE IF NOT EXISTS odds_snapshots (
+    id          BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    fixture_id  BIGINT      REFERENCES fixtures(id),
+    bookmaker   TEXT        NOT NULL,
+    market      TEXT        NOT NULL,
+    selection   TEXT        NOT NULL,
+    odd         NUMERIC(10,4) NOT NULL,
+    captured_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-create table if not exists predictions (
-    id bigint generated always as identity primary key,
-    fixture_id bigint references fixtures(id),
-    market text not null,
-    recommended_pick text not null,
-    model_probability numeric(8,4) not null,
-    implied_probability numeric(8,4) not null,
-    edge numeric(8,4) not null,
-    confidence_score numeric(8,4) not null,
-    argument_json jsonb,
-    is_publishable boolean not null default false,
-    created_at timestamptz not null default now()
+CREATE TABLE IF NOT EXISTS predictions (
+    id                  BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    fixture_id          BIGINT      REFERENCES fixtures(id),
+    market              TEXT        NOT NULL,
+    recommended_pick    TEXT        NOT NULL,
+    model_probability   NUMERIC(8,4) NOT NULL,
+    implied_probability NUMERIC(8,4) NOT NULL,
+    edge                NUMERIC(8,4) NOT NULL,
+    confidence_score    NUMERIC(8,4) NOT NULL,
+    argument_json       JSONB,
+    is_publishable      BOOLEAN     NOT NULL DEFAULT false,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-create table if not exists prediction_results (
-    id bigint generated always as identity primary key,
-    prediction_id bigint references predictions(id),
-    result_status text,
-    profit_loss_units numeric(10,4),
-    evaluated_at timestamptz
+CREATE TABLE IF NOT EXISTS prediction_results (
+    id                BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    prediction_id     BIGINT REFERENCES predictions(id),
+    result_status     TEXT,
+    profit_loss_units NUMERIC(10,4),
+    evaluated_at      TIMESTAMPTZ  NOT NULL DEFAULT now()
 );
 
-create table if not exists bot_logs (
-    id bigint generated always as identity primary key,
-    level text not null,
-    message text not null,
-    context jsonb,
-    created_at timestamptz not null default now()
+CREATE TABLE IF NOT EXISTS bot_logs (
+    id         BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    level      TEXT        NOT NULL,
+    message    TEXT        NOT NULL,
+    context    JSONB,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );

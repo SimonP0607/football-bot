@@ -39,7 +39,7 @@ class Settings:
 
     default_timezone: str = os.getenv("DEFAULT_TIMEZONE", "America/Bogota")
     default_markets: str = os.getenv("DEFAULT_MARKETS", "1X2,OU25,BTTS")
-    max_daily_picks: int = _int("MAX_DAILY_PICKS", 3)
+    max_daily_picks: int = _int("MAX_DAILY_PICKS", 5)
     min_edge: float = _float("MIN_EDGE", 0.05)
     min_confidence: float = _float("MIN_CONFIDENCE", 0.60)
 

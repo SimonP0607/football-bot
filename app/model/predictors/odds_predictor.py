@@ -63,11 +63,19 @@ class OddsPredictor:
         fixture_id: int = odds_rows[0]["fixture_id"]
 
         # market → bookmaker → selection → odd
+        # DB columns: market_key (not market), bookmaker_name (not bookmaker)
         grouped: dict[str, dict[str, dict[str, float]]] = defaultdict(
             lambda: defaultdict(dict)
         )
         for row in odds_rows:
-            grouped[row["market"]][row["bookmaker"]][row["selection"]] = float(row["odd"])
+            market = row.get("market_key") or row.get("market", "")
+            bookmaker = row.get("bookmaker_name") or row.get("bookmaker", "Unknown")
+            if not market:
+                continue
+            try:
+                grouped[market][bookmaker][row["selection"]] = float(row["odd"])
+            except (KeyError, TypeError, ValueError):
+                continue
 
         candidates: list[PredictionCandidate] = []
 

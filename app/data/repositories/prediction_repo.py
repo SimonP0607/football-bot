@@ -1,11 +1,14 @@
-"""Supabase repository for predictions."""
+"""Supabase repository for pick candidates (replaces predictions table).
+
+Table: pick_candidates
+  - market_key: canonical market code ('1X2', 'OU25', 'BTTS')
+  - selection:  selected outcome ('Home', 'Over 2.5', 'Yes', etc.)
+  - Replaces old: market (same values), recommended_pick (renamed to selection)
+"""
 
 import logging
-from datetime import datetime, time
-from zoneinfo import ZoneInfo
 
 from app.data.repositories.supabase_client import get_supabase
-from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -13,7 +16,7 @@ logger = logging.getLogger(__name__)
 def save_prediction(
     fixture_id: int,
     market: str,
-    recommended_pick: str,
+    selection: str,
     model_probability: float,
     implied_probability: float,
     edge: float,
@@ -21,18 +24,22 @@ def save_prediction(
     argument_json: dict,
     is_publishable: bool,
 ) -> dict:
-    """Insert or update a prediction (unique per fixture + market).
+    """Insert or update a pick candidate (unique per fixture + market_key + selection).
+
+    Args:
+        market: Canonical market code ('1X2', 'OU25', 'BTTS').
+        selection: Selected outcome ('Home', 'Draw', 'Away', 'Over 2.5', etc.).
 
     Returns the stored row dict.
     """
     client = get_supabase()
     result = (
-        client.table("predictions")
+        client.table("pick_candidates")
         .upsert(
             {
                 "fixture_id": fixture_id,
-                "market": market,
-                "recommended_pick": recommended_pick,
+                "market_key": market,
+                "selection": selection,
                 "model_probability": model_probability,
                 "implied_probability": implied_probability,
                 "edge": edge,
@@ -40,29 +47,25 @@ def save_prediction(
                 "argument_json": argument_json,
                 "is_publishable": is_publishable,
             },
-            on_conflict="fixture_id,market",
+            on_conflict="fixture_id,market_key,selection",
         )
         .execute()
     )
     row = result.data[0] if result.data else {}
     logger.debug(
-        "save_prediction fixture=%s market=%s edge=%.4f publishable=%s",
-        fixture_id, market, edge, is_publishable,
+        "save_prediction fixture=%s market=%s selection=%s edge=%.4f publishable=%s",
+        fixture_id, market, selection, edge, is_publishable,
     )
     return row
 
 
 def get_publishable_today(fixture_ids: list[int]) -> list[dict]:
-    """Return publishable predictions for today's fixtures, ordered by edge desc.
-
-    Args:
-        fixture_ids: Internal IDs of today's fixtures (from ``fixture_repo``).
-    """
+    """Return publishable pick candidates for today's fixtures, ordered by edge desc."""
     if not fixture_ids:
         return []
     client = get_supabase()
     result = (
-        client.table("predictions")
+        client.table("pick_candidates")
         .select("*")
         .eq("is_publishable", True)
         .in_("fixture_id", fixture_ids)
@@ -73,12 +76,12 @@ def get_publishable_today(fixture_ids: list[int]) -> list[dict]:
 
 
 def get_top_picks(fixture_ids: list[int], limit: int = 5) -> list[dict]:
-    """Return top predictions by confidence_score for today's fixtures."""
+    """Return top pick candidates by confidence_score for today's fixtures."""
     if not fixture_ids:
         return []
     client = get_supabase()
     result = (
-        client.table("predictions")
+        client.table("pick_candidates")
         .select("*")
         .eq("is_publishable", True)
         .in_("fixture_id", fixture_ids)
@@ -90,12 +93,12 @@ def get_top_picks(fixture_ids: list[int], limit: int = 5) -> list[dict]:
 
 
 def count_predictions_today(fixture_ids: list[int]) -> int:
-    """Return count of publishable predictions for today's fixtures."""
+    """Return count of publishable pick candidates for today's fixtures."""
     if not fixture_ids:
         return 0
     client = get_supabase()
     result = (
-        client.table("predictions")
+        client.table("pick_candidates")
         .select("id", count="exact")
         .eq("is_publishable", True)
         .in_("fixture_id", fixture_ids)

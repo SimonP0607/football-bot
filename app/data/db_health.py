@@ -18,12 +18,13 @@ logger = logging.getLogger(__name__)
 # Every table that must exist before the bot can serve data.
 CRITICAL_TABLES = [
     "bot_users",
-    "leagues",
+    "competitions",
+    "competition_seasons",
     "teams",
     "fixtures",
+    "fixture_contexts",
     "odds_snapshots",
-    "predictions",
-    "prediction_results",
+    "pick_candidates",
     "ref_bookmakers",
     "ref_bet_types",
     "api_sync_runs",
