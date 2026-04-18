@@ -12,8 +12,16 @@ Endpoint groups:
   Lineups    — starting XI near kickoff (Phase D)
 """
 
+import json
 import logging
-from .client import api_client
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+from .client import APIFootballError, api_client
+
+# Local cache for /timezone list — avoids calling it on every sync run
+_TIMEZONE_CACHE_FILE = Path(__file__).resolve().parents[3] / ".timezone_cache.json"
+_TIMEZONE_CACHE_TTL_DAYS = 7
 
 logger = logging.getLogger(__name__)
 
@@ -56,13 +64,83 @@ async def fetch_bet_types() -> list[dict]:
 
 
 async def validate_timezone(tz: str) -> bool:
-    """Return True if the given IANA timezone string is recognised by the API."""
-    data = await api_client.get("/timezone")
-    timezones: list[str] = data.get("response", [])
+    """Return True if the given IANA timezone string is recognised by the API.
+
+    Uses a local JSON cache (TTL: 7 days) to avoid calling /timezone on every
+    sync run.  If the API call fails for any reason the error is reported clearly
+    and the function returns True so the rest of the sync is not blocked.
+    """
+    timezones = _load_timezone_cache()
+    if timezones is None:
+        try:
+            data = await api_client.get("/timezone")
+            timezones = data.get("response", [])
+            if timezones:
+                _save_timezone_cache(timezones)
+        except APIFootballError as exc:
+            _log_timezone_api_error(exc)
+            return True  # Don't block sync on timezone validation failure
+        except Exception as exc:
+            logger.error(
+                "No se pudo validar timezone contra API-Football: %s\n"
+                "  → Revisa conectividad de red y API_FOOTBALL_KEY en .env",
+                exc,
+            )
+            return True
+
     valid = tz in timezones
     if not valid:
         logger.warning("Timezone '%s' no reconocida por API-Football", tz)
     return valid
+
+
+def _load_timezone_cache() -> list[str] | None:
+    """Return cached timezone list if it exists and has not expired."""
+    if not _TIMEZONE_CACHE_FILE.exists():
+        return None
+    try:
+        data: dict = json.loads(_TIMEZONE_CACHE_FILE.read_text(encoding="utf-8"))
+        saved_at = datetime.fromisoformat(data["saved_at"])
+        if datetime.now(timezone.utc) - saved_at > timedelta(days=_TIMEZONE_CACHE_TTL_DAYS):
+            logger.debug("Timezone cache expirada — se refrescará desde /timezone")
+            return None
+        timezones: list[str] = data["timezones"]
+        logger.debug("Timezone cache válida (%d zonas)", len(timezones))
+        return timezones
+    except Exception:
+        return None
+
+
+def _save_timezone_cache(timezones: list[str]) -> None:
+    """Persist timezone list to the local cache file."""
+    try:
+        _TIMEZONE_CACHE_FILE.write_text(
+            json.dumps(
+                {"saved_at": datetime.now(timezone.utc).isoformat(), "timezones": timezones},
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        logger.debug("Timezone cache guardada (%d zonas)", len(timezones))
+    except Exception as exc:
+        logger.debug("No se pudo guardar timezone cache: %s", exc)
+
+
+def _log_timezone_api_error(exc: APIFootballError) -> None:
+    """Log a clear, actionable message when /timezone fails with an API error."""
+    errors = exc.errors
+    error_str = str(errors).lower()
+    if "application key" in error_str or (
+        isinstance(errors, dict) and "token" in errors
+    ):
+        logger.error(
+            "Error de autenticación al llamar /timezone: %s\n"
+            "  → API_FOOTBALL_KEY en .env es inválida o está vacía.\n"
+            "  → Diagnóstico: python scripts/check_api_football.py",
+            errors,
+        )
+    else:
+        logger.error("Error de API-Football al llamar /timezone: %s", errors)
 
 
 # ── Phase B: League metadata + coverage ──────────────────────────────────────

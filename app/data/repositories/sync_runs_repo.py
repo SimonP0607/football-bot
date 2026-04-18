@@ -30,8 +30,11 @@ def start_sync_run(phase: str) -> int | None:
             .insert({"phase": phase, "status": "running"})
             .execute()
         )
-        row = result.data[0] if result.data else {}
-        run_id = row.get("id")
+        row = result.data[0] if result.data else None
+        if row is None:
+            return None
+        raw_id = row.get("id")
+        run_id: int | None = int(str(raw_id)) if raw_id is not None else None
         logger.debug("sync_run started: id=%s phase=%s", run_id, phase)
         return run_id
     except Exception as exc:

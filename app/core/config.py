@@ -58,15 +58,26 @@ class Settings:
     preferred_bookmaker_id: int = _int("PREFERRED_BOOKMAKER_ID", 0)
 
     def __post_init__(self) -> None:
+        # Strip whitespace to catch copy-paste errors (trailing newlines, spaces)
+        self.api_football_key = self.api_football_key.strip()
+        self.supabase_key = self.supabase_key.strip()
+        self.supabase_url = self.supabase_url.strip()
+        self.telegram_bot_token = self.telegram_bot_token.strip()
+
+        _placeholder = "<COMPLETAR>"
+
+        def _is_missing(val: str) -> bool:
+            return not val or _placeholder in val
+
         missing: list[str] = []
 
-        if not self.telegram_bot_token:
+        if _is_missing(self.telegram_bot_token):
             missing.append("TELEGRAM_BOT_TOKEN")
-        if not self.supabase_url:
+        if _is_missing(self.supabase_url):
             missing.append("SUPABASE_URL")
-        if not self.supabase_key:
+        if _is_missing(self.supabase_key):
             missing.append("SUPABASE_KEY")
-        if not self.api_football_key:
+        if _is_missing(self.api_football_key):
             missing.append("API_FOOTBALL_KEY")
 
         # TELEGRAM_ALLOWED_USER_ID is only required in production.
@@ -112,7 +123,7 @@ class Settings:
         key = self.api_football_key
         if not key:
             return "(not set)"
-        return key[:6] + "..." if len(key) > 6 else "***"
+        return "..." + key[-4:] if len(key) >= 4 else "***"
 
     @property
     def markets_list(self) -> list[str]:

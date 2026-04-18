@@ -28,13 +28,16 @@ load_dotenv()
 def _check_env() -> bool:
     ok = True
     for var in ("API_FOOTBALL_BASE_URL", "API_FOOTBALL_KEY"):
-        val = os.getenv(var, "")
+        val = os.getenv(var, "").strip()
         if not val or "<COMPLETAR>" in val:
             print(f"  ✗ {var} no está configurado en .env")
             ok = False
         else:
-            masked = val[:15] + "..." if len(var) == "API_FOOTBALL_KEY" else val
-            print(f"  ✓ {var} = {val if var == 'API_FOOTBALL_BASE_URL' else val[:8] + '...'}")
+            if var == "API_FOOTBALL_KEY":
+                display = ("..." + val[-4:]) if len(val) >= 4 else "***"
+            else:
+                display = val
+            print(f"  ✓ {var} = {display}")
     return ok
 
 
@@ -43,18 +46,23 @@ async def _check_status(client) -> bool:
     try:
         data = await client.get("/status")
         resp = data.get("response", {})
-        account = resp.get("account", {})
         subscription = resp.get("subscription", {})
         requests = resp.get("requests", {})
 
-        print(f"  ✓ Conectado correctamente")
+        print("  ✓ Conectado correctamente")
         print(f"    Plan:              {subscription.get('plan', 'N/A')}")
         print(f"    Suscripción activa:{subscription.get('active', 'N/A')}")
         print(f"    Requests hoy:      {requests.get('current', 'N/A')} / {requests.get('limit_day', 'N/A')}")
         return True
     except Exception as exc:
+        exc_str = str(exc).lower()
         print(f"  ✗ Error al llamar /status: {exc}")
-        print("    Verifica que API_FOOTBALL_KEY sea válida.")
+        if "application key" in exc_str or "token" in exc_str:
+            print("    → API_FOOTBALL_KEY en .env es inválida, está vacía o tiene espacios.")
+            print("    → Verifica la key en: https://dashboard.api-football.com")
+            print("    → Asegúrate de que .env existe en la raíz del proyecto y tiene la key correcta.")
+        else:
+            print("    → Verifica conectividad de red y que API_FOOTBALL_KEY sea válida.")
         return False
 
 

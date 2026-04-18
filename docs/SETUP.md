@@ -156,10 +156,89 @@ Política por defecto: odds → 7 días, fixture_contexts → 14 días, sync_run
 
 ---
 
+## Diagnóstico rápido
+
+### Primer comando a ejecutar
+
+Antes de cualquier otra cosa, verifica que las dos integraciones externas funcionen:
+
+```bash
+python scripts/check_supabase.py       # Verifica Supabase + schema
+python scripts/check_api_football.py   # Verifica API-Football + credenciales
+```
+
+---
+
+### Error: `Error/Missing application key`
+
+Este error lo devuelve API-Football cuando la key es inválida, está vacía o falta en el header.
+
+**Pasos para diagnosticar:**
+
+1. Verifica que `.env` existe en la raíz del proyecto (al lado de `requirements.txt`):
+   ```bash
+   ls .env
+   ```
+
+2. Verifica que `API_FOOTBALL_KEY` tiene un valor real (no `<COMPLETAR>`):
+   ```bash
+   python -c "from dotenv import load_dotenv; load_dotenv(); import os; k=os.getenv('API_FOOTBALL_KEY',''); print('OK:', k[-4:] if len(k)>=4 else 'VACÍA')"
+   ```
+
+3. Ejecuta el check oficial:
+   ```bash
+   python scripts/check_api_football.py
+   ```
+   Debe mostrar `✓ Conectado correctamente`. Si muestra `✗`, la key en `.env` no es válida.
+
+4. Si la key parece correcta pero falla: copia la key directamente desde
+   [dashboard.api-football.com](https://dashboard.api-football.com) y pégala de nuevo en `.env`.
+   Asegúrate de que no tenga espacios al inicio ni al final.
+
+---
+
+### Cómo validar que `.env` cargó correctamente
+
+```bash
+python -c "
+from app.core.config import settings
+print('API key (últimos 4):', settings.masked_api_key)
+print('Supabase URL:', settings.supabase_url[:30] + '...')
+print('Timezone:', settings.default_timezone)
+"
+```
+
+Si aparece `(not set)` para algún campo, el `.env` no tiene esa variable o tiene el placeholder `<COMPLETAR>`.
+
+---
+
+### Cómo probar API-Football manualmente
+
+```bash
+# Sin fixtures de ejemplo (solo credenciales):
+python scripts/check_api_football.py
+
+# Con fixtures de una liga específica:
+python scripts/check_api_football.py --league 39 --season 2025
+```
+
+---
+
+### Cómo probar Supabase
+
+```bash
+python scripts/check_supabase.py
+```
+
+Verifica conexión, tablas requeridas y muestra conteos actuales.
+
+---
+
 ## Troubleshooting
 
 | Síntoma | Causa probable | Solución |
 |---------|---------------|----------|
+| `Error/Missing application key` | `API_FOOTBALL_KEY` inválida o vacía | Ver sección Diagnóstico arriba |
 | `/hoy` sin picks | No se corrió Phase C o no hay odds | `sync_today.py` |
 | Phase C: "tracked_competitions vacío" | No se corrió el seed | Ejecutar `seed_tracked_competitions.sql` |
 | Phase B: "no hay ligas" | `DEFAULT_LEAGUE_IDS` vacío | Configurar en `.env` |

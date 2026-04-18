@@ -61,8 +61,13 @@ class APIFootballClient:
 
     def __init__(self) -> None:
         self._base_url = settings.api_football_base_url
+        key = settings.api_football_key
+        masked = ("..." + key[-4:]) if len(key) >= 4 else "***"
+        logger.debug(
+            "API-Football client inicializado — key=%s base_url=%s", masked, self._base_url
+        )
         self._headers = {
-            "x-apisports-key": settings.api_football_key,
+            "x-apisports-key": key,
             "Accept": "application/json",
         }
 
@@ -137,7 +142,15 @@ class APIFootballClient:
             errors = data.get("errors")
             if errors:
                 safe_errors = _sanitize_errors(errors)
-                logger.error("Error de API-Football en %s: %s", path, safe_errors)
+                if _is_auth_error(safe_errors):
+                    logger.error(
+                        "Error de autenticación en API-Football (%s): %s\n"
+                        "  → API_FOOTBALL_KEY en .env es inválida, está vacía o tiene espacios.\n"
+                        "  → Verifica ejecutando: python scripts/check_api_football.py",
+                        path, safe_errors,
+                    )
+                else:
+                    logger.error("Error de API-Football en %s: %s", path, safe_errors)
                 raise APIFootballError(path, safe_errors)
 
             results = data.get("results", 0)
@@ -217,6 +230,14 @@ def _sanitize_errors(errors: dict | list) -> dict | list:
     if isinstance(errors, dict):
         return {k: v for k, v in errors.items() if "key" not in k.lower()}
     return errors
+
+
+def _is_auth_error(errors: dict | list) -> bool:
+    """Return True if errors indicate a missing/invalid API key."""
+    text = str(errors).lower()
+    return "application key" in text or (
+        isinstance(errors, dict) and "token" in errors
+    )
 
 
 def _empty_wrapper(path: str, params: dict | None) -> dict:
