@@ -43,11 +43,19 @@ class Settings:
     min_edge: float = _float("MIN_EDGE", 0.05)
     min_confidence: float = _float("MIN_CONFIDENCE", 0.60)
 
-    # Sync configuration — optional; required only when running sync_today.py.
-    # Comma-separated API-Football league IDs (e.g. "39,140" for PL + La Liga).
+    # Sync configuration
     default_league_ids: str = os.getenv("DEFAULT_LEAGUE_IDS", "")
-    # Four-digit season year (e.g. 2025). 0 means not configured.
     default_season: int = _int("DEFAULT_SEASON", 0)
+    league_seasons: str = os.getenv("LEAGUE_SEASONS", "")
+
+    # Preferred bookmaker for odds selection (optional).
+    # When set, the system favours this bookmaker's odds when available.
+    # Use the bookmaker name as returned by /odds/bookmakers (e.g. "Bet365").
+    preferred_bookmaker: str = os.getenv("PREFERRED_BOOKMAKER", "")
+
+    # Preferred bookmaker ID (numeric). Takes priority over preferred_bookmaker
+    # name when set.  Find the ID from /odds/bookmakers or ref_bookmakers table.
+    preferred_bookmaker_id: int = _int("PREFERRED_BOOKMAKER_ID", 0)
 
     def __post_init__(self) -> None:
         missing: list[str] = []
@@ -76,12 +84,7 @@ class Settings:
 
     @property
     def is_bootstrap_mode(self) -> bool:
-        """True when the owner has not yet set TELEGRAM_ALLOWED_USER_ID.
-
-        In bootstrap mode the bot starts normally and responds to /id from any
-        sender. All other protected commands are disabled and return a setup
-        prompt instead of "Acceso no autorizado".
-        """
+        """True when the owner has not yet set TELEGRAM_ALLOWED_USER_ID."""
         return self.telegram_allowed_user_id == 0
 
     @property
@@ -123,6 +126,22 @@ class Settings:
             for x in self.default_league_ids.split(",")
             if x.strip().isdigit()
         ]
+
+    @property
+    def league_seasons_map(self) -> dict[int, int]:
+        """Parse LEAGUE_SEASONS into a {league_id: season} dict.
+
+        Format: "39:2025,140:2025,253:2026"
+        """
+        result: dict[int, int] = {}
+        for entry in self.league_seasons.split(","):
+            entry = entry.strip()
+            if ":" not in entry:
+                continue
+            league_str, season_str = entry.split(":", 1)
+            if league_str.strip().isdigit() and season_str.strip().isdigit():
+                result[int(league_str.strip())] = int(season_str.strip())
+        return result
 
 
 settings = Settings()

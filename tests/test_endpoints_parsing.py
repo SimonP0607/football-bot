@@ -2,70 +2,78 @@
 
 These tests mock the HTTP client and verify that ``fetch_odds`` correctly:
 - maps API-Football market names to internal codes
-- filters Only the 2.5 line for OU25
+- filters only the 2.5 line for OU25
 - skips invalid or unsupported markets
 - handles empty responses gracefully
+- returns enriched rows with bookmaker_id and bet_id
 """
 
 import pytest
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
-# Import the function under test directly (no real HTTP calls)
 from app.data.api_football.endpoints import fetch_odds, fetch_fixtures
 
 
-# ── Sample API-Football responses ─────────────────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
-def _odds_response(fixture_id: int = 1) -> dict:
-    """Minimal realistic /odds response for fixture_id."""
-    return {
-        "results": 1,
-        "response": [
-            {
-                "fixture": {"id": fixture_id},
-                "bookmakers": [
-                    {
-                        "id": 8,
-                        "name": "Bet365",
-                        "bets": [
-                            {
-                                "id": 1,
-                                "name": "Match Winner",
-                                "values": [
-                                    {"value": "Home", "odd": "2.10"},
-                                    {"value": "Draw", "odd": "3.50"},
-                                    {"value": "Away", "odd": "4.00"},
-                                ],
-                            },
-                            {
-                                "id": 5,
-                                "name": "Goals Over/Under",
-                                "values": [
-                                    {"value": "Over 1.5",  "odd": "1.30"},  # should be skipped
-                                    {"value": "Over 2.5",  "odd": "2.20"},
-                                    {"value": "Under 2.5", "odd": "1.70"},
-                                    {"value": "Over 3.5",  "odd": "3.10"},  # should be skipped
-                                ],
-                            },
-                            {
-                                "id": 8,
-                                "name": "Both Teams Score",
-                                "values": [
-                                    {"value": "Yes", "odd": "1.90"},
-                                    {"value": "No",  "odd": "1.90"},
-                                ],
-                            },
-                            {
-                                "id": 999,
-                                "name": "Unsupported Market",
-                                "values": [{"value": "Yes", "odd": "1.50"}],
-                            },
-                        ],
-                    }
-                ],
-            }
-        ],
-    }
+def _make_paginated_mock(page_items: list) -> MagicMock:
+    """Return an async generator mock that yields one page with the given items."""
+    async def _gen(*args, **kwargs):
+        yield page_items
+
+    mock_client = MagicMock()
+    mock_client.get_paginated = _gen
+    mock_client.get = AsyncMock()
+    return mock_client
+
+
+def _odds_response_items(fixture_id: int = 1) -> list:
+    """Minimal /odds response items (single page) with typical markets."""
+    return [
+        {
+            "fixture": {"id": fixture_id},
+            "bookmakers": [
+                {
+                    "id": 8,
+                    "name": "Bet365",
+                    "bets": [
+                        {
+                            "id": 1,
+                            "name": "Match Winner",
+                            "values": [
+                                {"value": "Home", "odd": "2.10"},
+                                {"value": "Draw", "odd": "3.50"},
+                                {"value": "Away", "odd": "4.00"},
+                            ],
+                        },
+                        {
+                            "id": 5,
+                            "name": "Goals Over/Under",
+                            "values": [
+                                {"value": "Over 1.5",  "odd": "1.30"},  # skipped
+                                {"value": "Over 2.5",  "odd": "2.20"},
+                                {"value": "Under 2.5", "odd": "1.70"},
+                                {"value": "Over 3.5",  "odd": "3.10"},  # skipped
+                            ],
+                        },
+                        {
+                            "id": 8,
+                            "name": "Both Teams Score",
+                            "values": [
+                                {"value": "Yes", "odd": "1.90"},
+                                {"value": "No",  "odd": "1.90"},
+                            ],
+                        },
+                        {
+                            "id": 999,
+                            "name": "Unsupported Market",
+                            "values": [{"value": "Yes", "odd": "1.50"}],
+                        },
+                    ],
+                }
+            ],
+        }
+    ]
 
 
 def _fixtures_response() -> dict:
@@ -76,7 +84,9 @@ def _fixtures_response() -> dict:
                 "fixture": {
                     "id": 12345,
                     "date": "2025-01-15T20:00:00+00:00",
-                    "status": {"short": "NS"},
+                    "status": {"short": "NS", "long": "Not Started", "elapsed": None},
+                    "timezone": "UTC",
+                    "venue": {"id": 556, "name": "Old Trafford"},
                 },
                 "league": {"id": 39, "name": "Premier League", "country": "England", "season": 2025},
                 "teams": {
@@ -92,16 +102,16 @@ def _fixtures_response() -> dict:
 
 @pytest.mark.asyncio
 async def test_fetch_odds_empty_response():
-    with patch("app.data.api_football.endpoints.api_client") as mock_client:
-        mock_client.get = AsyncMock(return_value={"results": 0, "response": []})
+    mock_client = _make_paginated_mock([])
+    with patch("app.data.api_football.endpoints.api_client", mock_client):
         rows = await fetch_odds(fixture_id=1, markets=["1X2"])
     assert rows == []
 
 
 @pytest.mark.asyncio
 async def test_fetch_odds_maps_1x2_market():
-    with patch("app.data.api_football.endpoints.api_client") as mock_client:
-        mock_client.get = AsyncMock(return_value=_odds_response())
+    mock_client = _make_paginated_mock(_odds_response_items())
+    with patch("app.data.api_football.endpoints.api_client", mock_client):
         rows = await fetch_odds(fixture_id=1, markets=["1X2"])
 
     markets_found = {r["market"] for r in rows}
@@ -110,8 +120,8 @@ async def test_fetch_odds_maps_1x2_market():
 
 @pytest.mark.asyncio
 async def test_fetch_odds_1x2_has_three_selections():
-    with patch("app.data.api_football.endpoints.api_client") as mock_client:
-        mock_client.get = AsyncMock(return_value=_odds_response())
+    mock_client = _make_paginated_mock(_odds_response_items())
+    with patch("app.data.api_football.endpoints.api_client", mock_client):
         rows = await fetch_odds(fixture_id=1, markets=["1X2"])
 
     selections = {r["selection"] for r in rows}
@@ -120,20 +130,19 @@ async def test_fetch_odds_1x2_has_three_selections():
 
 @pytest.mark.asyncio
 async def test_fetch_odds_ou25_keeps_only_2_5_line():
-    with patch("app.data.api_football.endpoints.api_client") as mock_client:
-        mock_client.get = AsyncMock(return_value=_odds_response())
+    mock_client = _make_paginated_mock(_odds_response_items())
+    with patch("app.data.api_football.endpoints.api_client", mock_client):
         rows = await fetch_odds(fixture_id=1, markets=["OU25"])
 
     ou25_rows = [r for r in rows if r["market"] == "OU25"]
     selections = {r["selection"] for r in ou25_rows}
-    # Must include Over/Under 2.5 but NOT other lines (1.5, 3.5, etc.)
     assert selections == {"Over 2.5", "Under 2.5"}
 
 
 @pytest.mark.asyncio
 async def test_fetch_odds_btts_selections():
-    with patch("app.data.api_football.endpoints.api_client") as mock_client:
-        mock_client.get = AsyncMock(return_value=_odds_response())
+    mock_client = _make_paginated_mock(_odds_response_items())
+    with patch("app.data.api_football.endpoints.api_client", mock_client):
         rows = await fetch_odds(fixture_id=1, markets=["BTTS"])
 
     btts_rows = [r for r in rows if r["market"] == "BTTS"]
@@ -143,8 +152,8 @@ async def test_fetch_odds_btts_selections():
 
 @pytest.mark.asyncio
 async def test_fetch_odds_skips_unsupported_market():
-    with patch("app.data.api_football.endpoints.api_client") as mock_client:
-        mock_client.get = AsyncMock(return_value=_odds_response())
+    mock_client = _make_paginated_mock(_odds_response_items())
+    with patch("app.data.api_football.endpoints.api_client", mock_client):
         rows = await fetch_odds(fixture_id=1, markets=["1X2", "OU25", "BTTS"])
 
     markets_found = {r["market"] for r in rows}
@@ -155,8 +164,8 @@ async def test_fetch_odds_skips_unsupported_market():
 @pytest.mark.asyncio
 async def test_fetch_odds_requested_market_subset():
     """Only request 1X2 — OU25 and BTTS rows must not appear."""
-    with patch("app.data.api_football.endpoints.api_client") as mock_client:
-        mock_client.get = AsyncMock(return_value=_odds_response())
+    mock_client = _make_paginated_mock(_odds_response_items())
+    with patch("app.data.api_football.endpoints.api_client", mock_client):
         rows = await fetch_odds(fixture_id=1, markets=["1X2"])
 
     markets_found = {r["market"] for r in rows}
@@ -166,24 +175,29 @@ async def test_fetch_odds_requested_market_subset():
 
 @pytest.mark.asyncio
 async def test_fetch_odds_row_structure():
-    """Each returned row must have the expected keys and types."""
-    with patch("app.data.api_football.endpoints.api_client") as mock_client:
-        mock_client.get = AsyncMock(return_value=_odds_response())
+    """Each returned row must have the expected keys including new bookmaker_id/bet_id."""
+    mock_client = _make_paginated_mock(_odds_response_items())
+    with patch("app.data.api_football.endpoints.api_client", mock_client):
         rows = await fetch_odds(fixture_id=1, markets=["1X2"])
 
+    expected_keys = {"bookmaker_id", "bookmaker_name", "bet_id", "market", "selection", "odd"}
     for row in rows:
-        assert set(row.keys()) == {"bookmaker", "market", "selection", "odd"}
+        assert set(row.keys()) == expected_keys
         assert isinstance(row["odd"], float)
         assert row["odd"] > 1.0
+        assert isinstance(row["bookmaker_id"], int)
+        assert isinstance(row["bet_id"], int)
 
 
 @pytest.mark.asyncio
-async def test_fetch_odds_bookmaker_name():
-    with patch("app.data.api_football.endpoints.api_client") as mock_client:
-        mock_client.get = AsyncMock(return_value=_odds_response())
+async def test_fetch_odds_bookmaker_name_and_id():
+    mock_client = _make_paginated_mock(_odds_response_items())
+    with patch("app.data.api_football.endpoints.api_client", mock_client):
         rows = await fetch_odds(fixture_id=1, markets=["1X2"])
 
-    assert all(r["bookmaker"] == "Bet365" for r in rows)
+    assert all(r["bookmaker_name"] == "Bet365" for r in rows)
+    assert all(r["bookmaker_id"] == 8 for r in rows)
+    assert all(r["bet_id"] == 1 for r in rows)  # Match Winner bet_id
 
 
 # ── Tests: fetch_fixtures parsing ─────────────────────────────────────────────

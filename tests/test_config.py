@@ -68,7 +68,7 @@ def test_default_thresholds():
 
 
 def test_is_bootstrap_mode_false_when_user_id_set():
-    s = Settings(**VALID)  # VALID has telegram_allowed_user_id=12345
+    s = Settings(**VALID)
     assert s.is_bootstrap_mode is False
 
 
@@ -96,11 +96,55 @@ def test_masked_token_empty():
     assert s.masked_token == "(not set)"
 
 
-def test_league_ids_list_empty_by_default():
-    s = Settings(**VALID)
+def test_league_ids_list_empty_when_not_configured():
+    s = Settings(**{**VALID, "default_league_ids": ""})
     assert s.league_ids_list == []
 
 
 def test_league_ids_list_parses_correctly():
     s = Settings(**{**VALID, "default_league_ids": "39,140,253"})
     assert s.league_ids_list == [39, 140, 253]
+
+
+def test_league_seasons_map_empty_by_default():
+    s = Settings(**{**VALID, "league_seasons": ""})
+    assert s.league_seasons_map == {}
+
+
+def test_league_seasons_map_parses_correctly():
+    s = Settings(**{**VALID, "league_seasons": "39:2025,140:2025,253:2026"})
+    assert s.league_seasons_map == {39: 2025, 140: 2025, 253: 2026}
+
+
+def test_league_seasons_map_ignores_invalid_entries():
+    s = Settings(**{**VALID, "league_seasons": "39:2025,bad_entry,253:2026"})
+    assert s.league_seasons_map == {39: 2025, 253: 2026}
+
+
+# ── New settings added in v2 ──────────────────────────────────────────────────
+
+
+def test_preferred_bookmaker_defaults_to_empty():
+    s = Settings(**VALID)
+    assert s.preferred_bookmaker == ""
+
+
+def test_preferred_bookmaker_id_defaults_to_zero():
+    s = Settings(**VALID)
+    assert s.preferred_bookmaker_id == 0
+
+
+def test_preferred_bookmaker_parses():
+    s = Settings(**{**VALID, "preferred_bookmaker": "Bet365"})
+    assert s.preferred_bookmaker == "Bet365"
+
+
+def test_preferred_bookmaker_id_parses():
+    s = Settings(**{**VALID, "preferred_bookmaker_id": 6})
+    assert s.preferred_bookmaker_id == 6
+
+
+def test_masked_api_key_hides_key():
+    s = Settings(**{**VALID, "api_football_key": "abc123secret"})
+    assert "secret" not in s.masked_api_key
+    assert "..." in s.masked_api_key

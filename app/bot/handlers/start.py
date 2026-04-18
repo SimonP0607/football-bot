@@ -1,25 +1,24 @@
 import logging
 from telegram import Update
 from telegram.ext import ContextTypes
-from app.core.config import settings
+
+from app.bot.middleware.auth import require_auth
 
 logger = logging.getLogger(__name__)
 
 
+@require_auth
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    if not user or user.id != settings.telegram_allowed_user_id:
-        uid = user.id if user else "unknown"
-        logger.warning("Acceso no autorizado desde user_id=%s", uid)
-        await update.message.reply_text("Acceso no autorizado.")
-        return
-
-    logger.info("Comando /start desde user_id=%s", user.id)
+    logger.info("Comando /start desde user_id=%s", update.effective_user.id)
     await update.message.reply_text(
         "Bot de pronósticos listo.\n\n"
         "Comandos disponibles:\n"
         "/hoy — picks publicables del día\n"
         "/top — mejores picks por confianza\n"
-        "/estado — resumen de sincronización\n"
-        "/start — este mensaje"
+        "/partido &lt;id o equipo&gt; — análisis de un partido\n"
+        "/ligas — ligas activas y cobertura\n"
+        "/estado — resumen de sincronización y cuota API\n"
+        "/id — muestra tu Telegram user ID\n"
+        "/start — este mensaje",
+        parse_mode="HTML",
     )

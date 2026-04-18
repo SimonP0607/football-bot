@@ -24,6 +24,10 @@ CRITICAL_TABLES = [
     "odds_snapshots",
     "predictions",
     "prediction_results",
+    "ref_bookmakers",
+    "ref_bet_types",
+    "api_sync_runs",
+    "api_usage_snapshots",
 ]
 
 

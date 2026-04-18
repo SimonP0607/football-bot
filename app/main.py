@@ -10,6 +10,8 @@ from app.bot.handlers.top import top_handler
 from app.bot.handlers.estado import estado_handler
 from app.bot.handlers.id import id_handler
 from app.bot.handlers.debug_config import debug_config_handler
+from app.bot.handlers.partido import partido_handler
+from app.bot.handlers.ligas import ligas_handler
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +20,9 @@ _BOT_COMMANDS = [
     BotCommand("start", "Información y lista de comandos"),
     BotCommand("hoy", "Picks publicables del día"),
     BotCommand("top", "Top picks por confianza"),
-    BotCommand("estado", "Estado del sistema (Telegram, DB, datos)"),
+    BotCommand("partido", "Análisis de un partido concreto"),
+    BotCommand("ligas", "Ligas activas y su cobertura"),
+    BotCommand("estado", "Estado del sistema (Telegram, DB, API, datos)"),
     BotCommand("id", "Ver tu Telegram user ID (setup inicial)"),
 ]
 
@@ -63,8 +67,9 @@ async def _post_init(application: Application) -> None:
         logger.error("    1. Abre Supabase → SQL Editor")
         logger.error("    2. Ejecuta sql/migrations/001_init.sql")
         logger.error("    3. Ejecuta sql/migrations/002_constraints_and_indexes.sql")
-        logger.error("    4. Ejecuta: python scripts/sync_today.py")
-        logger.error("  Guía completa: python scripts/bootstrap_database.py")
+        logger.error("    4. Ejecuta sql/migrations/003_api_football_v2.sql")
+        logger.error("    5. Ejecuta: python scripts/sync_reference.py")
+        logger.error("    6. Ejecuta: python scripts/sync_today.py")
         logger.error("═" * 65)
     else:
         logger.info("Supabase: conexión OK, schema aplicado — todas las tablas presentes")
@@ -97,6 +102,8 @@ def build_app() -> Application:
     application.add_handler(CommandHandler("start", start_handler))
     application.add_handler(CommandHandler("hoy", hoy_handler))
     application.add_handler(CommandHandler("top", top_handler))
+    application.add_handler(CommandHandler("partido", partido_handler))
+    application.add_handler(CommandHandler("ligas", ligas_handler))
     application.add_handler(CommandHandler("estado", estado_handler))
     application.add_handler(CommandHandler("id", id_handler))
 
