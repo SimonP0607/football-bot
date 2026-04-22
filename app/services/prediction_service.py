@@ -10,6 +10,8 @@ v2 pipeline:
 
 import logging
 from dataclasses import replace
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from app.core.config import settings
 from app.data.repositories import fixture_repo, odds_repo, prediction_repo
@@ -20,6 +22,28 @@ from app.model.filters.pick_filter import PickFilter
 logger = logging.getLogger(__name__)
 
 
+def _is_prematch(fix: dict, lead_minutes: int) -> bool:
+    """Return True only if the fixture is not yet started and kicks off in more
+    than ``lead_minutes`` minutes from now.
+
+    status_short values that mean "not started": NS, TBD, or empty/None.
+    Any other value (1H, HT, 2H, ET, BT, P, SUSP, INT, FT, AET, PEN, ABD,
+    AWD, WO) means the match is in progress or finished.
+    """
+    if fix.get("status_short") not in (None, "", "NS", "TBD"):
+        return False
+    kickoff = fix.get("kickoff_at")
+    if not kickoff:
+        return True  # unknown kickoff → keep it (safe default)
+    try:
+        tz = ZoneInfo(settings.default_timezone)
+        now = datetime.now(tz)
+        ko = datetime.fromisoformat(kickoff).astimezone(tz)
+        return (ko - now).total_seconds() >= lead_minutes * 60
+    except Exception:
+        return True  # parse error → keep it
+
+
 class PredictionService:
     """Runs the full prediction pipeline for today's fixtures."""
 
@@ -28,29 +52,48 @@ class PredictionService:
         self._filter = PickFilter()
 
     def run_for_today(self) -> dict:
-        """Calculate and persist picks for all of today's fixtures.
+        """Calculate and persist picks for all of today's prematch fixtures.
 
         Flow:
         1. Fetch today's fixtures (already synced, with context_json).
-        2. For each fixture: load odds, run OddsPredictor, apply MatchContextScorer.
-        3. Merge signals into enriched argument_json.
-        4. Apply PickFilter and persist all candidates.
+        2. Filter to prematch-only (not started, >= PREMATCH_MIN_LEAD_MINUTES).
+        3. For each fixture: load odds, run OddsPredictor, apply MatchContextScorer.
+        4. Merge signals into enriched argument_json.
+        5. Apply PickFilter and persist all candidates.
 
         Returns:
-            Summary dict with counts.
+            Summary dict with pipeline counters.
         """
-        fixtures = fixture_repo.get_fixtures_today()
-        if not fixtures:
+        all_fixtures = fixture_repo.get_fixtures_today()
+        if not all_fixtures:
             logger.info("Sin fixtures para hoy — prediction pipeline omitido")
-            return {"fixtures": 0, "picks_saved": 0}
+            return {
+                "fixtures_fetched": 0,
+                "discarded_started": 0,
+                "discarded_no_odds": 0,
+                "candidates_generated": 0,
+                "publishable_saved": 0,
+            }
 
+        lead = settings.prematch_min_lead_minutes
+        prematch_fixtures = [f for f in all_fixtures if _is_prematch(f, lead)]
+        discarded_started = len(all_fixtures) - len(prematch_fixtures)
+        if discarded_started:
+            logger.info(
+                "Prematch filter: %d/%d fixtures descartados (iniciados o en <%d min)",
+                discarded_started, len(all_fixtures), lead,
+            )
+
+        discarded_no_odds = 0
+        total_candidates = 0
         total_picks = 0
 
-        for fix in fixtures:
+        for fix in prematch_fixtures:
             fixture_id: int = fix["id"]
             odds_rows = odds_repo.get_odds_for_fixture(fixture_id)
             if not odds_rows:
                 logger.debug("fixture_id=%s sin cuotas, omitido", fixture_id)
+                discarded_no_odds += 1
                 continue
 
             context = fix.get("context_json") or {}
@@ -65,6 +108,7 @@ class PredictionService:
                 self._enrich_candidate(c, context)
                 for c in candidates
             ]
+            total_candidates += len(enriched)
 
             # Log enriched candidates before filter (DEBUG to avoid noise in prod)
             logger.debug(
@@ -102,6 +146,23 @@ class PredictionService:
                     is_publishable=is_pub,
                 )
 
+            # Register publishable picks in pick_results (pending settlement).
+            # Import here to avoid circular import at module level.
+            from app.data.repositories import settlement_repo
+            for candidate in enriched:
+                if (candidate.market, candidate.selection) in publishable_set:
+                    saved = prediction_repo.get_candidate_id(
+                        candidate.fixture_id, candidate.market, candidate.selection
+                    )
+                    if saved:
+                        settlement_repo.create_pending(
+                            pick_candidate_id=saved,
+                            fixture_id=candidate.fixture_id,
+                            market_key=candidate.market,
+                            selection=candidate.selection,
+                            odd_taken=candidate.best_odd,
+                        )
+
             total_picks += len(publishable)
             logger.info(
                 "fixture_id=%s → %d candidatos, %d publicables "
@@ -110,8 +171,20 @@ class PredictionService:
                 settings.min_edge, settings.min_confidence,
             )
 
-        summary = {"fixtures": len(fixtures), "picks_saved": total_picks}
-        logger.info("Prediction pipeline completado: %s", summary)
+        summary = {
+            "fixtures_fetched": len(all_fixtures),
+            "discarded_started": discarded_started,
+            "discarded_no_odds": discarded_no_odds,
+            "candidates_generated": total_candidates,
+            "publishable_saved": total_picks,
+        }
+        logger.info(
+            "Pipeline summary | fetched=%d started=%d no_odds=%d "
+            "candidates=%d publishable=%d",
+            summary["fixtures_fetched"], summary["discarded_started"],
+            summary["discarded_no_odds"], summary["candidates_generated"],
+            summary["publishable_saved"],
+        )
         return summary
 
     def _enrich_candidate(
@@ -157,21 +230,35 @@ class PredictionService:
             argument_json=enriched_arg,
         )
 
-    # ── Query methods (unchanged interface) ──────────────────────────────────
+    # ── Query methods ─────────────────────────────────────────────────────────
 
     def get_today_picks(self) -> tuple[list[dict], list[dict]]:
-        """Return (predictions, fixtures) for today's publishable picks."""
-        fixtures = fixture_repo.get_fixtures_today()
-        fixture_ids = [f["id"] for f in fixtures]
-        predictions = prediction_repo.get_publishable_today(fixture_ids)
-        return predictions, fixtures
+        """Return (predictions, fixtures) for today's publishable prematch picks.
 
-    def get_top_picks(self, limit: int = 5) -> tuple[list[dict], list[dict]]:
-        """Return (predictions, fixtures) for the top picks by confidence."""
-        fixtures = fixture_repo.get_fixtures_today()
-        fixture_ids = [f["id"] for f in fixtures]
+        predictions are ordered by kickoff (chronological).
+        fixtures list contains only prematch fixtures.
+        """
+        all_fixtures = fixture_repo.get_fixtures_today()
+        lead = settings.prematch_min_lead_minutes
+        prematch = [f for f in all_fixtures if _is_prematch(f, lead)]
+        fixture_ids = [f["id"] for f in sorted(prematch, key=lambda f: f.get("kickoff_at", ""))]
+        predictions = prediction_repo.get_publishable_today(fixture_ids)
+        return predictions, prematch
+
+    def get_top_picks(self, limit: int | None = None) -> tuple[list[dict], list[dict]]:
+        """Return (predictions, fixtures) for the top picks by quality score.
+
+        Uses settings.top_picks_limit when limit is None.
+        fixtures list contains only prematch fixtures.
+        """
+        if limit is None:
+            limit = settings.top_picks_limit
+        all_fixtures = fixture_repo.get_fixtures_today()
+        lead = settings.prematch_min_lead_minutes
+        prematch = [f for f in all_fixtures if _is_prematch(f, lead)]
+        fixture_ids = [f["id"] for f in prematch]
         predictions = prediction_repo.get_top_picks(fixture_ids, limit=limit)
-        return predictions, fixtures
+        return predictions, prematch
 
     def get_estado(self) -> dict:
         """Return a status summary for the /estado command."""

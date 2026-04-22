@@ -68,17 +68,55 @@ def _edge_icon(edge: float) -> str:
 # ── /hoy and /top formatter ───────────────────────────────────────────────────
 
 
+def _pick_block(pred: dict, fix: dict, team_names: dict, league_names: dict) -> str:
+    """Build a single pick HTML block (shared by /hoy and /top)."""
+    home = team_names.get(fix["home_team_id"], "Local")
+    away = team_names.get(fix["away_team_id"], "Visitante")
+    league = league_names.get(fix["league_id"], "")
+    kickoff = _kickoff_str(fix["kickoff_at"])
+
+    market_lbl = _market_label(pred["market_key"])
+    pick_lbl = _selection_label(pred["market_key"], pred["selection"])
+    edge = pred["edge"]
+    icon = _edge_icon(edge)
+    arg = pred.get("argument_json") or {}
+
+    best_odd = arg.get("best_odd", "?")
+    best_bk = arg.get("best_bookmaker", "")
+    reasons: list[str] = arg.get("reasons", [])
+    main_risk: str = arg.get("main_risk", "")
+    bk_str = f" ({best_bk})" if best_bk else ""
+
+    lines = [
+        f"<b>{home} vs {away}</b>",
+        f"⚽ {league} · {kickoff}",
+        "",
+        f"{icon} <b>{market_lbl} — {pick_lbl}</b>",
+        f"💰 Cuota: <b>{best_odd}</b>{bk_str}",
+        f"📈 Prob. modelo: <b>{_pct(pred['model_probability'])}</b> · "
+        f"Implícita: {_pct(pred['implied_probability'])}",
+        f"⚡ Edge: <b>{_edge_str(edge)}</b> · Confianza: <b>{_pct(pred['confidence_score'])}</b>",
+    ]
+
+    if reasons:
+        lines.append("")
+        lines.append("📋 <b>Razones:</b>")
+        for r in reasons[:3]:
+            lines.append(f"  · {r}")
+
+    if main_risk:
+        lines.append(f"⚠️ <b>Riesgo:</b> {main_risk}")
+
+    return "\n".join(lines)
+
+
 def format_picks(
     predictions: list[dict],
     fixtures: list[dict],
     team_names: dict[int, str],
     league_names: dict[int, str],
 ) -> str:
-    """Build the HTML message shown by /hoy and /top.
-
-    Each pick block shows: match, time, market, odds, edge, confidence,
-    implied probability, reasons, and main risk.
-    """
+    """Build the /hoy HTML message: all publishable picks ordered by kickoff."""
     if not predictions:
         return (
             "No hay picks publicables para hoy.\n\n"
@@ -87,57 +125,67 @@ def format_picks(
         )
 
     fixture_by_id = {f["id"]: f for f in fixtures}
-    blocks: list[str] = []
 
-    for pred in predictions:
+    # Sort by kickoff so earlier matches appear first
+    sorted_preds = sorted(
+        predictions,
+        key=lambda p: (fixture_by_id.get(p["fixture_id"], {}).get("kickoff_at") or ""),
+    )
+
+    blocks: list[str] = []
+    for pred in sorted_preds:
         fix = fixture_by_id.get(pred["fixture_id"])
         if not fix:
             continue
-
-        home = team_names.get(fix["home_team_id"], "Local")
-        away = team_names.get(fix["away_team_id"], "Visitante")
-        league = league_names.get(fix["league_id"], "")
-        kickoff = _kickoff_str(fix["kickoff_at"])
-
-        market_lbl = _market_label(pred["market_key"])
-        pick_lbl = _selection_label(pred["market_key"], pred["selection"])
-        edge = pred["edge"]
-        icon = _edge_icon(edge)
-        arg = pred.get("argument_json") or {}
-
-        best_odd = arg.get("best_odd", "?")
-        best_bk = arg.get("best_bookmaker", "")
-        reasons: list[str] = arg.get("reasons", [])
-        main_risk: str = arg.get("main_risk", "")
-
-        bk_str = f" ({best_bk})" if best_bk else ""
-
-        lines = [
-            f"<b>{home} vs {away}</b>",
-            f"⚽ {league} · {kickoff}",
-            "",
-            f"{icon} <b>{market_lbl} — {pick_lbl}</b>",
-            f"💰 Cuota: <b>{best_odd}</b>{bk_str}",
-            f"📈 Prob. modelo: <b>{_pct(pred['model_probability'])}</b> · "
-            f"Implícita: {_pct(pred['implied_probability'])}",
-            f"⚡ Edge: <b>{_edge_str(edge)}</b> · Confianza: <b>{_pct(pred['confidence_score'])}</b>",
-        ]
-
-        if reasons:
-            lines.append("")
-            lines.append("📋 <b>Razones:</b>")
-            for r in reasons[:3]:
-                lines.append(f"  · {r}")
-
-        if main_risk:
-            lines.append(f"⚠️ <b>Riesgo:</b> {main_risk}")
-
-        blocks.append("\n".join(lines))
+        blocks.append(_pick_block(pred, fix, team_names, league_names))
 
     if not blocks:
         return "No hay picks publicables para hoy."
 
-    header = f"<b>Picks del día</b> ({len(blocks)})\n"
+    header = f"📅 <b>Picks de hoy</b> ({len(blocks)}) — orden cronológico\n"
+    separator = "\n\n" + "─" * 30 + "\n\n"
+    return header + separator.join(blocks)
+
+
+def format_top_picks(
+    predictions: list[dict],
+    fixtures: list[dict],
+    team_names: dict[int, str],
+    league_names: dict[int, str],
+) -> str:
+    """Build the /top HTML message: ranked picks by quality score with badges."""
+    if not predictions:
+        return (
+            "No hay picks suficientes para hoy.\n\n"
+            "Si ya aplicaste las migraciones, sincroniza con:\n"
+            "<code>python scripts/sync_today.py</code>"
+        )
+
+    fixture_by_id = {f["id"]: f for f in fixtures}
+
+    # Sort by composite quality: confidence weighted 60%, edge weighted 40%
+    ranked = sorted(
+        predictions,
+        key=lambda p: p.get("confidence_score", 0) * 0.6 + max(0.0, p.get("edge", 0)) * 0.4,
+        reverse=True,
+    )
+
+    rank_badges = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣"]
+    blocks: list[str] = []
+
+    for idx, pred in enumerate(ranked):
+        fix = fixture_by_id.get(pred["fixture_id"])
+        if not fix:
+            continue
+        badge = rank_badges[idx] if idx < len(rank_badges) else f"#{idx + 1}"
+        rank_line = f"{badge} <b>#{idx + 1}</b>"
+        body = _pick_block(pred, fix, team_names, league_names)
+        blocks.append(rank_line + "\n" + body)
+
+    if not blocks:
+        return "No hay picks publicables para hoy."
+
+    header = f"🏆 <b>Top picks</b> ({len(blocks)}) — mejores oportunidades del día\n"
     separator = "\n\n" + "─" * 30 + "\n\n"
     return header + separator.join(blocks)
 

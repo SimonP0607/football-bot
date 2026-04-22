@@ -92,6 +92,23 @@ def get_top_picks(fixture_ids: list[int], limit: int = 5) -> list[dict]:
     return result.data or []
 
 
+def get_candidate_id(fixture_id: int, market: str, selection: str) -> int | None:
+    """Return the internal id of a pick_candidate row, or None if not found."""
+    client = get_supabase()
+    result = (
+        client.table("pick_candidates")
+        .select("id")
+        .eq("fixture_id", fixture_id)
+        .eq("market_key", market)
+        .eq("selection", selection)
+        .limit(1)
+        .execute()
+    )
+    if result.data:
+        return result.data[0]["id"]
+    return None
+
+
 def count_predictions_today(fixture_ids: list[int]) -> int:
     """Return count of publishable pick candidates for today's fixtures."""
     if not fixture_ids:

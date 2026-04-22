@@ -51,6 +51,13 @@ class Settings:
     # bar that avoids picking against the market. Set higher for more selectivity.
     min_confidence: float = _float("MIN_CONFIDENCE", 0.52)
 
+    # Prematch guard: fixtures that kick off within this many minutes are skipped
+    # when generating or displaying picks.
+    prematch_min_lead_minutes: int = _int("PREMATCH_MIN_LEAD_MINUTES", 15)
+
+    # Maximum number of picks shown by /top (separate from MAX_DAILY_PICKS cap).
+    top_picks_limit: int = _int("TOP_PICKS_LIMIT", 3)
+
     # Sync configuration
     default_league_ids: str = os.getenv("DEFAULT_LEAGUE_IDS", "")
     default_season: int = _int("DEFAULT_SEASON", 0)

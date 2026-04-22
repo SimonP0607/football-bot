@@ -25,6 +25,7 @@ import logging
 import statistics
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
@@ -141,6 +142,8 @@ class OddsPredictor:
                     "best_odd": best_odd,
                     "best_bookmaker": best_bookmaker_for.get(selection, ""),
                     "avg_overround": round(statistics.mean(overrounds), 4) if overrounds else None,
+                    "snapshot_at": datetime.now(timezone.utc).isoformat(),
+                    "scope": "prematch",
                 }
 
                 candidates.append(
