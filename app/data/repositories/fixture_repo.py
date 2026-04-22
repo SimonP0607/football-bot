@@ -105,7 +105,6 @@ def upsert_competition_season(
         payload["season_end"] = season_end
     if current:
         payload["current"] = True
-        payload["is_active"] = True
 
     result = (
         client.table("competition_seasons")
@@ -265,7 +264,18 @@ def get_tracked_league_seasons() -> dict[int, dict]:
         logger.debug("get_tracked_league_seasons: %d ligas activas", len(out))
         return out
     except Exception as exc:
-        logger.warning("get_tracked_league_seasons falló: %s", exc)
+        err_str = str(exc)
+        if "sync_tier" in err_str or (
+            "column" in err_str.lower() and "tracked_competitions" in err_str
+        ):
+            logger.error(
+                "get_tracked_league_seasons: columna 'sync_tier' no existe en "
+                "tracked_competitions. Aplica la migración en Supabase SQL Editor:\n"
+                "  sql/migrations/011_sync_tier.sql\n"
+                "El sistema usará competition_seasons.current=True como fallback.",
+            )
+        else:
+            logger.warning("get_tracked_league_seasons falló: %s", exc)
         return {}
 
 
@@ -309,40 +319,32 @@ def get_active_league_seasons(league_ids: list[int] | None = None) -> dict[int, 
 
 
 def get_active_leagues() -> list[dict]:
-    """Return all active league-seasons with sync_tier, ordered by name."""
+    """Return all operator-configured leagues from tracked_competitions.is_active=True."""
     client = get_supabase()
-    # Get competition_seasons that are active
-    cs_result = (
-        client.table("competition_seasons")
-        .select("id, season, coverage, competitions(provider_league_id, name, country)")
-        .eq("is_active", True)
-        .execute()
-    )
-    # Get tracked_competitions for sync_tier info
-    tc_result = (
+    result = (
         client.table("tracked_competitions")
-        .select("competition_season_id, sync_tier, priority")
+        .select(
+            "competition_season_id, sync_tier, priority, "
+            "competition_seasons(season, coverage, competitions(provider_league_id, name, country))"
+        )
         .eq("is_active", True)
         .execute()
     )
-    tc_by_cs: dict[int, dict] = {
-        row["competition_season_id"]: row for row in (tc_result.data or [])
-    }
-
     leagues = []
-    for row in (cs_result.data or []):
-        comp = row.get("competitions") or {}
-        cs_id = row["id"]
-        tc = tc_by_cs.get(cs_id, {})
+    for row in (result.data or []):
+        cs = row.get("competition_seasons") or {}
+        if not isinstance(cs, dict) or not cs:
+            continue
+        comp = cs.get("competitions") or {}
         leagues.append({
-            "id": cs_id,
-            "provider_league_id": comp.get("provider_league_id"),
-            "name": comp.get("name", ""),
-            "country": comp.get("country"),
-            "season": row.get("season"),
-            "coverage": row.get("coverage"),
-            "sync_tier": tc.get("sync_tier", "tier_1_daily"),
-            "priority": tc.get("priority", 5),
+            "id": row.get("competition_season_id"),
+            "provider_league_id": comp.get("provider_league_id") if isinstance(comp, dict) else None,
+            "name": comp.get("name", "") if isinstance(comp, dict) else "",
+            "country": comp.get("country") if isinstance(comp, dict) else None,
+            "season": cs.get("season"),
+            "coverage": cs.get("coverage"),
+            "sync_tier": row.get("sync_tier") or "tier_1_daily",
+            "priority": row.get("priority", 5),
         })
     return sorted(leagues, key=lambda x: (x.get("priority") or 5, x.get("name") or ""))
 

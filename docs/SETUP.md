@@ -244,3 +244,4 @@ Verifica conexión, tablas requeridas y muestra conteos actuales.
 | Phase B: "no hay ligas" | `DEFAULT_LEAGUE_IDS` vacío | Configurar en `.env` |
 | Odds sin picks | Edge < `MIN_EDGE` o confianza < `MIN_CONFIDENCE` | Revisar thresholds en `.env` |
 | `/estado` muestra schema faltante | Migración 010 no aplicada | Ejecutar en Supabase SQL Editor |
+| `42P10` en `upsert_bet_types` | `on_conflict` usaba solo `provider_bet_id`; la constraint es `(provider_bet_id, scope)` | Corregido en código — sin migración necesaria |

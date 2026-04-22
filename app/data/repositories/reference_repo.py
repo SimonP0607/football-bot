@@ -74,7 +74,7 @@ def upsert_bet_types(bet_types: list[dict], scope: str = "prematch") -> int:
 
     client = get_supabase()
     client.table("ref_bet_types").upsert(
-        payload, on_conflict="provider_bet_id"
+        payload, on_conflict="provider_bet_id,scope"
     ).execute()
     logger.info("upsert_bet_types → %d tipos guardados (scope=%s)", len(payload), scope)
     return len(payload)

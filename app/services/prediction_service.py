@@ -66,6 +66,19 @@ class PredictionService:
                 for c in candidates
             ]
 
+            # Log enriched candidates before filter (DEBUG to avoid noise in prod)
+            logger.debug(
+                "fixture_id=%s — candidatos pre-filtro (%d):", fixture_id, len(enriched)
+            )
+            for c in enriched:
+                logger.debug(
+                    "  %s/%s: model_prob=%.4f implied=%.4f edge=%.4f "
+                    "conf=%.4f best_odd=%.2f (%s)",
+                    c.market, c.selection,
+                    c.model_probability, c.implied_probability,
+                    c.edge, c.confidence_score, c.best_odd, c.best_bookmaker,
+                )
+
             # Apply filter (edge + confidence thresholds + max picks cap)
             publishable = self._filter.apply(
                 enriched,
@@ -91,8 +104,10 @@ class PredictionService:
 
             total_picks += len(publishable)
             logger.info(
-                "fixture_id=%s → %d candidatos, %d publicables",
+                "fixture_id=%s → %d candidatos, %d publicables "
+                "(min_edge=%.2f, min_conf=%.2f)",
                 fixture_id, len(enriched), len(publishable),
+                settings.min_edge, settings.min_confidence,
             )
 
         summary = {"fixtures": len(fixtures), "picks_saved": total_picks}

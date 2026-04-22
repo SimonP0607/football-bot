@@ -158,8 +158,17 @@ class OddsPredictor:
                     )
                 )
 
-        logger.debug(
-            "OddsPredictor fixture=%s → %d candidatos en %d mercados",
-            fixture_id, len(candidates), len(grouped),
-        )
+        if candidates:
+            edges = [c.edge for c in candidates]
+            confs = [c.confidence_score for c in candidates]
+            logger.info(
+                "OddsPredictor fixture=%s → %d candidatos | "
+                "edge [%.4f .. %.4f] | conf [%.4f .. %.4f] | %d mercados",
+                fixture_id, len(candidates),
+                min(edges), max(edges),
+                min(confs), max(confs),
+                len(grouped),
+            )
+        else:
+            logger.debug("OddsPredictor fixture=%s → sin candidatos", fixture_id)
         return candidates

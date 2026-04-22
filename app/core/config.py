@@ -40,8 +40,16 @@ class Settings:
     default_timezone: str = os.getenv("DEFAULT_TIMEZONE", "America/Bogota")
     default_markets: str = os.getenv("DEFAULT_MARKETS", "1X2,OU25,BTTS")
     max_daily_picks: int = _int("MAX_DAILY_PICKS", 5)
-    min_edge: float = _float("MIN_EDGE", 0.05)
-    min_confidence: float = _float("MIN_CONFIDENCE", 0.60)
+    # edge = model_prob (fair consensus) - implied_prob (1/best_odd).
+    # In efficient markets with 7-10% overround, fair probs are ~7pp below raw
+    # implied. Edge of 0.0 means the best available odd is at or above consensus
+    # fair break-even — a genuinely meaningful threshold. Use 0.05 only if you
+    # want to target genuine soft lines (rare in liquid markets).
+    min_edge: float = _float("MIN_EDGE", 0.0)
+    # confidence_score == model_probability (fair consensus prob). 0.52 means
+    # the market consensus considers this outcome a slight majority — the lowest
+    # bar that avoids picking against the market. Set higher for more selectivity.
+    min_confidence: float = _float("MIN_CONFIDENCE", 0.52)
 
     # Sync configuration
     default_league_ids: str = os.getenv("DEFAULT_LEAGUE_IDS", "")

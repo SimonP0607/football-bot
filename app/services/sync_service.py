@@ -138,7 +138,8 @@ class SyncService:
         run_id = sync_runs_repo.start_sync_run("bootstrap")
         api_calls = 0
         updated = 0
-        skipped = 0
+        skipped_api = 0
+        skipped_no_data = 0
         try:
             for league_id, season in effective.items():
                 try:
@@ -149,32 +150,42 @@ class SyncService:
                     error_text = str(exc).lower()
                     if "free plan" in error_text or "free plans" in error_text:
                         logger.warning(
-                            "Phase B: liga=%s season=%s — plan gratuito no permite esta temporada. "
+                            "Phase B: league=%s season=%s — plan gratuito no permite esta temporada. "
                             "Error: %s",
                             league_id, season, exc,
                         )
                     else:
                         logger.warning(
-                            "Phase B: liga=%s season=%s — error de API: %s — continuando",
+                            "Phase B: league=%s season=%s — error de API: %s — continuando",
                             league_id, season, exc,
                         )
-                    skipped += 1
+                    skipped_api += 1
                     continue
                 except Exception as exc:
                     api_calls += 1
                     logger.warning(
-                        "Phase B: liga=%s season=%s — error inesperado: %s — continuando",
+                        "Phase B: league=%s season=%s — error inesperado: %s — continuando",
                         league_id, season, exc,
                     )
-                    skipped += 1
+                    skipped_api += 1
                     continue
 
                 if not meta:
                     logger.warning(
-                        "Phase B: sin datos para league=%s season=%s", league_id, season
+                        "Phase B: sin datos de API para league=%s season=%s — "
+                        "¿el ID es correcto? ¿existe la temporada?",
+                        league_id, season,
                     )
-                    skipped += 1
+                    skipped_no_data += 1
                     continue
+
+                if not meta.get("current", False):
+                    logger.warning(
+                        "Phase B: league=%s season=%s — la API indica que %s NO es la "
+                        "temporada activa. Verifica DEFAULT_SEASON o usa "
+                        "--leagues %s:<temporada_correcta>.",
+                        league_id, season, season, league_id,
+                    )
 
                 fixture_repo.upsert_league(
                     provider_league_id=league_id,
@@ -190,18 +201,20 @@ class SyncService:
                 updated += 1
                 logger.info(
                     "Phase B: league=%s season=%s → coverage guardada "
-                    "(standings=%s injuries=%s predictions=%s odds=%s)",
+                    "(standings=%s injuries=%s predictions=%s odds=%s current=%s)",
                     league_id, season,
                     meta.get("coverage", {}).get("standings"),
                     meta.get("coverage", {}).get("injuries"),
                     meta.get("coverage", {}).get("predictions"),
                     meta.get("coverage", {}).get("odds"),
+                    meta.get("current", False),
                 )
 
             summary = {
                 "leagues_resolved": len(effective),
                 "leagues_updated": updated,
-                "leagues_skipped": skipped,
+                "leagues_skipped_api_error": skipped_api,
+                "leagues_skipped_no_data": skipped_no_data,
             }
             final_status = "completed" if updated > 0 else "completed_with_warnings"
             sync_runs_repo.finish_sync_run(
@@ -598,10 +611,10 @@ class SyncService:
 
             return internal_id, odds_count, api_calls
 
-        except (KeyError, TypeError, ValueError):
+        except Exception:
             logger.exception(
-                "Error parseando fixture item: %s",
-                item.get("fixture", {}).get("id"),
+                "Error procesando fixture provider=%s league=%s — continuando",
+                item.get("fixture", {}).get("id"), league_id,
             )
             return None
 
