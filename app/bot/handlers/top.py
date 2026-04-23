@@ -24,7 +24,7 @@ async def top_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
 
     try:
         predictions, fixtures = prediction_service.get_top_picks(
-            limit=settings.top_picks_limit
+            limit=settings.max_daily_picks
         )
 
         # Batch-resolve team and league names (2 queries regardless of fixture count)

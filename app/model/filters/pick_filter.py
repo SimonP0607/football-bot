@@ -13,6 +13,25 @@ _MIN_BOOKMAKERS = 2
 _MAX_ODD_THRESHOLD = 8.0
 _HIGH_ODD_MIN_CONF = 0.55
 
+# Composite score penalties applied in ranking (does not affect threshold filters).
+_PENALTY_LOW_BOOKMAKERS = 0.02   # < 3 bookmakers → sparse consensus
+_PENALTY_HIGH_ODD = 0.05         # odd > 8 → longshot risk
+
+
+def _composite_score(c: PredictionCandidate) -> float:
+    """Composite ranking score: confidence 60% + edge 40%, with soft penalizations.
+
+    Used only for ranking/cap selection, not for accept/reject decisions.
+    Penalties reduce the score of weaker signals without outright discarding them.
+    """
+    score = c.confidence_score * 0.6 + max(0.0, c.edge) * 0.4
+    arg = c.argument_json or {}
+    if arg.get("bookmakers_count", 0) < 3:
+        score -= _PENALTY_LOW_BOOKMAKERS
+    if c.best_odd > _MAX_ODD_THRESHOLD:
+        score -= _PENALTY_HIGH_ODD
+    return score
+
 
 class PickFilter:
     """Filters PredictionCandidates by edge, confidence, and max count."""
@@ -100,20 +119,31 @@ class PickFilter:
             else:
                 passing.append(c)
 
-        passing.sort(key=lambda c: c.edge, reverse=True)
+        passing.sort(key=_composite_score, reverse=True)
         result = passing[:max_picks]
+        cap_discarded = passing[max_picks:]
+
+        for c in cap_discarded:
+            logger.info(
+                "  FUERA-CAP fixture=%s %s/%s — score=%.4f edge=%.4f conf=%.4f "
+                "best_odd=%.2f (cap global=%d)",
+                c.fixture_id, c.market, c.selection,
+                _composite_score(c), c.edge, c.confidence_score,
+                c.best_odd, max_picks,
+            )
 
         for c in result:
             logger.info(
-                "  ACEPTADO  fixture=%s %s/%s — edge=%.4f conf=%.4f "
-                "best_odd=%.2f model_prob=%.4f implied=%.4f",
+                "  OFICIAL   fixture=%s %s/%s — score=%.4f edge=%.4f conf=%.4f "
+                "best_odd=%.2f model_prob=%.4f",
                 c.fixture_id, c.market, c.selection,
-                c.edge, c.confidence_score,
-                c.best_odd, c.model_probability, c.implied_probability,
+                _composite_score(c), c.edge, c.confidence_score,
+                c.best_odd, c.model_probability,
             )
 
         logger.info(
-            "PickFilter: %d candidatos → %d pasaron (min_edge=%.2f, min_conf=%.2f, max=%d)",
-            len(candidates), len(result), min_edge, min_confidence, max_picks,
+            "PickFilter: %d candidatos → %d pasaron thresholds → %d oficiales "
+            "(cap=%d, descartados_cap=%d)",
+            len(candidates), len(passing), len(result), max_picks, len(cap_discarded),
         )
         return result

@@ -50,8 +50,13 @@ def create_pending(
         row = result.data[0] if result.data else {}
         if row:
             logger.debug(
-                "settlement create_pending pick_candidate_id=%s fixture=%s %s/%s odd=%.2f",
+                "settlement CREADO pick_candidate_id=%s fixture=%s %s/%s odd=%.2f",
                 pick_candidate_id, fixture_id, market_key, selection, odd_taken,
+            )
+        else:
+            logger.debug(
+                "settlement YA EXISTÍA pick_candidate_id=%s fixture=%s %s/%s (idempotente)",
+                pick_candidate_id, fixture_id, market_key, selection,
             )
         return row
     except Exception as exc:

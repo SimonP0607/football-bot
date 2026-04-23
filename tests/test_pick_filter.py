@@ -22,7 +22,7 @@ def _candidate(
         confidence_score=confidence,
         best_odd=1 / (confidence - edge) if (confidence - edge) > 0 else 99,
         best_bookmaker="TestBK",
-        argument_json={},
+        argument_json={"bookmakers_count": 3},
     )
 
 

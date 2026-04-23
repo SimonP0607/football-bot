@@ -58,8 +58,10 @@ class PredictionService:
         1. Fetch today's fixtures (already synced, with context_json).
         2. Filter to prematch-only (not started, >= PREMATCH_MIN_LEAD_MINUTES).
         3. For each fixture: load odds, run OddsPredictor, apply MatchContextScorer.
-        4. Merge signals into enriched argument_json.
-        5. Apply PickFilter and persist all candidates.
+        4. Collect ALL enriched candidates across ALL fixtures.
+        5. Apply PickFilter ONCE globally: thresholds + composite ranking + hard cap.
+        6. Persist all candidates (is_publishable = True only for the top-cap winners).
+        7. Create pending settlement for official picks (idempotent).
 
         Returns:
             Summary dict with pipeline counters.
@@ -73,6 +75,8 @@ class PredictionService:
                 "discarded_no_odds": 0,
                 "candidates_generated": 0,
                 "publishable_saved": 0,
+                "settlement_created": 0,
+                "settlement_existing": 0,
             }
 
         lead = settings.prematch_min_lead_minutes
@@ -84,9 +88,9 @@ class PredictionService:
                 discarded_started, len(all_fixtures), lead,
             )
 
+        # Phase 1: collect ALL enriched candidates across every fixture
         discarded_no_odds = 0
-        total_candidates = 0
-        total_picks = 0
+        all_enriched: list[PredictionCandidate] = []
 
         for fix in prematch_fixtures:
             fixture_id: int = fix["id"]
@@ -97,93 +101,93 @@ class PredictionService:
                 continue
 
             context = fix.get("context_json") or {}
-
-            # v1: odds consensus model
             candidates = self._predictor.calculate(odds_rows)
             if not candidates:
                 continue
 
-            # v2: enrich each candidate with context signals
-            enriched = [
-                self._enrich_candidate(c, context)
-                for c in candidates
-            ]
-            total_candidates += len(enriched)
+            enriched = [self._enrich_candidate(c, context) for c in candidates]
+            all_enriched.extend(enriched)
 
-            # Log enriched candidates before filter (DEBUG to avoid noise in prod)
             logger.debug(
-                "fixture_id=%s — candidatos pre-filtro (%d):", fixture_id, len(enriched)
+                "fixture_id=%s — %d candidatos acumulados (total hasta ahora: %d)",
+                fixture_id, len(enriched), len(all_enriched),
             )
-            for c in enriched:
-                logger.debug(
-                    "  %s/%s: model_prob=%.4f implied=%.4f edge=%.4f "
-                    "conf=%.4f best_odd=%.2f (%s)",
-                    c.market, c.selection,
-                    c.model_probability, c.implied_probability,
-                    c.edge, c.confidence_score, c.best_odd, c.best_bookmaker,
-                )
 
-            # Apply filter (edge + confidence thresholds + max picks cap)
-            publishable = self._filter.apply(
-                enriched,
-                min_edge=settings.min_edge,
-                min_confidence=settings.min_confidence,
-                max_picks=settings.max_daily_picks,
+        total_candidates = len(all_enriched)
+        fixtures_with_odds = len(prematch_fixtures) - discarded_no_odds
+        logger.info(
+            "Pre-filtro: %d candidatos totales de %d fixtures con cuotas",
+            total_candidates, fixtures_with_odds,
+        )
+
+        # Phase 2: apply global filter + hard cap ONCE across all candidates
+        publishable = self._filter.apply(
+            all_enriched,
+            min_edge=settings.min_edge,
+            min_confidence=settings.min_confidence,
+            max_picks=settings.max_daily_picks,
+        )
+        publishable_set = {(p.fixture_id, p.market, p.selection) for p in publishable}
+        logger.info(
+            "Cap global: %d picks oficiales de %d candidatos (cap=%d)",
+            len(publishable), total_candidates, settings.max_daily_picks,
+        )
+
+        # Phase 3: persist ALL candidates — only the top-cap set gets is_publishable=True
+        for candidate in all_enriched:
+            is_pub = (candidate.fixture_id, candidate.market, candidate.selection) in publishable_set
+            prediction_repo.save_prediction(
+                fixture_id=candidate.fixture_id,
+                market=candidate.market,
+                selection=candidate.selection,
+                model_probability=candidate.model_probability,
+                implied_probability=candidate.implied_probability,
+                edge=candidate.edge,
+                confidence_score=candidate.confidence_score,
+                argument_json=candidate.argument_json,
+                is_publishable=is_pub,
             )
-            publishable_set = {(p.market, p.selection) for p in publishable}
 
-            for candidate in enriched:
-                is_pub = (candidate.market, candidate.selection) in publishable_set
-                prediction_repo.save_prediction(
+        # Phase 4: create pending settlement for official picks (idempotent)
+        # Import here to avoid circular import at module level.
+        from app.data.repositories import settlement_repo
+        settlement_created = 0
+        settlement_existing = 0
+        for candidate in publishable:
+            saved_id = prediction_repo.get_candidate_id(
+                candidate.fixture_id, candidate.market, candidate.selection
+            )
+            if saved_id:
+                row = settlement_repo.create_pending(
+                    pick_candidate_id=saved_id,
                     fixture_id=candidate.fixture_id,
-                    market=candidate.market,
+                    market_key=candidate.market,
                     selection=candidate.selection,
-                    model_probability=candidate.model_probability,
-                    implied_probability=candidate.implied_probability,
-                    edge=candidate.edge,
-                    confidence_score=candidate.confidence_score,
-                    argument_json=candidate.argument_json,
-                    is_publishable=is_pub,
+                    odd_taken=candidate.best_odd,
                 )
+                if row:
+                    settlement_created += 1
+                else:
+                    settlement_existing += 1
 
-            # Register publishable picks in pick_results (pending settlement).
-            # Import here to avoid circular import at module level.
-            from app.data.repositories import settlement_repo
-            for candidate in enriched:
-                if (candidate.market, candidate.selection) in publishable_set:
-                    saved = prediction_repo.get_candidate_id(
-                        candidate.fixture_id, candidate.market, candidate.selection
-                    )
-                    if saved:
-                        settlement_repo.create_pending(
-                            pick_candidate_id=saved,
-                            fixture_id=candidate.fixture_id,
-                            market_key=candidate.market,
-                            selection=candidate.selection,
-                            odd_taken=candidate.best_odd,
-                        )
-
-            total_picks += len(publishable)
-            logger.info(
-                "fixture_id=%s → %d candidatos, %d publicables "
-                "(min_edge=%.2f, min_conf=%.2f)",
-                fixture_id, len(enriched), len(publishable),
-                settings.min_edge, settings.min_confidence,
-            )
-
+        total_picks = len(publishable)
         summary = {
             "fixtures_fetched": len(all_fixtures),
             "discarded_started": discarded_started,
             "discarded_no_odds": discarded_no_odds,
             "candidates_generated": total_candidates,
             "publishable_saved": total_picks,
+            "settlement_created": settlement_created,
+            "settlement_existing": settlement_existing,
         }
         logger.info(
-            "Pipeline summary | fetched=%d started=%d no_odds=%d "
-            "candidates=%d publishable=%d",
-            summary["fixtures_fetched"], summary["discarded_started"],
-            summary["discarded_no_odds"], summary["candidates_generated"],
-            summary["publishable_saved"],
+            "=== RESUMEN DEL DÍA === fixtures=%d prematch=%d sin_cuotas=%d "
+            "candidatos=%d | picks_oficiales=%d (cap=%d) | "
+            "settlement_nuevo=%d ya_existia=%d",
+            summary["fixtures_fetched"], len(prematch_fixtures),
+            discarded_no_odds, total_candidates,
+            total_picks, settings.max_daily_picks,
+            settlement_created, settlement_existing,
         )
         return summary
 
@@ -248,11 +252,11 @@ class PredictionService:
     def get_top_picks(self, limit: int | None = None) -> tuple[list[dict], list[dict]]:
         """Return (predictions, fixtures) for the top picks by quality score.
 
-        Uses settings.top_picks_limit when limit is None.
+        Uses settings.max_daily_picks when limit is None (same cap as official picks).
         fixtures list contains only prematch fixtures.
         """
         if limit is None:
-            limit = settings.top_picks_limit
+            limit = settings.max_daily_picks
         all_fixtures = fixture_repo.get_fixtures_today()
         lead = settings.prematch_min_lead_minutes
         prematch = [f for f in all_fixtures if _is_prematch(f, lead)]
