@@ -145,14 +145,154 @@ T-90m  sync_prematch.py --window 90  (odds frescos + lineups)
 
 ---
 
-## Limpieza de retención
+## Retención de datos
 
-```bash
-python scripts/cleanup.py --dry-run    # ver qué se eliminaría
-python scripts/cleanup.py              # ejecutar limpieza real
+### Tablas permanentes (nunca se borran)
+
+| Tabla | Razón |
+|-------|-------|
+| `competitions` | Catálogo de ligas |
+| `competition_seasons` | Temporadas por liga |
+| `teams` | Catálogo de equipos |
+| `venues` | Estadios |
+| `ref_bookmakers` | Referencia de bookmakers |
+| `ref_bet_types` | Referencia de mercados |
+| `tracked_competitions` | Configuración de sync por tier |
+| `bot_users` | Usuarios autorizados del bot |
+
+### Tablas operativas con TTL
+
+| Tabla | TTL por defecto | Variable de entorno |
+|-------|-----------------|---------------------|
+| `fixtures` | 3 días | `RETENTION_FIXTURES_DAYS` |
+| `odds_snapshots` | 3 días | `RETENTION_ODDS_DAYS` |
+| `fixture_contexts` | 3 días | `RETENTION_CONTEXT_DAYS` |
+| `pick_candidates` | 3 días (solo huérfanos) | `RETENTION_CANDIDATES_DAYS` |
+| `published_picks` | 45 días | `RETENTION_PUBLISHED_PICKS_DAYS` |
+| `pick_results` | 90 días (resueltos) | `RETENTION_SETTLEMENT_DAYS` |
+| `api_sync_runs` | 14 días | `RETENTION_SYNC_RUNS_DAYS` |
+| `api_usage_snapshots` | 14 días | `RETENTION_USAGE_DAYS` |
+| `h2h_cache` | 30 días | `RETENTION_H2H_DAYS` |
+| `team_competition_metrics` | 30 días | `RETENTION_TEAM_METRICS_DAYS` |
+| `market_availability_cache` | 30 días | `RETENTION_MARKET_CACHE_DAYS` |
+| `cron.job_run_details` | 14 días | `RETENTION_CRON_HISTORY_DAYS` |
+
+> `pick_candidates` solo se borran cuando ya no tienen `published_picks` ni `pick_results` asociados.
+> `pick_results` con `result_status = 'pending'` nunca se borran automáticamente.
+
+### Frecuencia de limpieza
+
+El cron nocturno corre una vez al día a las **03:10 Bogota (08:10 UTC)**.
+No hay resets durante `sync_today.py` ni `sync_reference.py`.
+
+---
+
+### Pasos para activar la retención
+
+#### 1. Aplicar migración 013
+
+En **Supabase → SQL Editor**:
+
+```sql
+-- Copiar y pegar el contenido de:
+sql/migrations/013_retention_cleanup.sql
 ```
 
-Política por defecto: odds → 7 días, fixture_contexts → 14 días, sync_runs → 90 días.
+Crea las funciones `cleanup_retention()` y `cleanup_retention_preview()`.
+
+#### 2. Script manual
+
+```bash
+# Preview: ver cuántas filas se eliminarían (sin tocar nada)
+python scripts/cleanup.py --dry-run
+
+# Limpieza real
+python scripts/cleanup.py
+```
+
+Los valores de TTL se leen automáticamente de `.env`.
+
+#### 3. Cron nocturno (Supabase SQL Editor)
+
+```sql
+-- Copiar y pegar el contenido de:
+sql/cron_schedule_cleanup.sql
+```
+
+Crea el job `football-bot-cleanup-nightly` que corre a las 08:10 UTC.
+
+Verificar que el job está activo:
+```sql
+SELECT jobid, jobname, schedule, active FROM cron.job;
+```
+
+> pg_cron requiere que la extensión esté habilitada en tu proyecto Supabase.
+> En Supabase Free, pg_cron puede no estar disponible — usa el script manual con Task Scheduler o cron local.
+
+#### 4. Archivado local (opcional)
+
+Exporta filas antiguas a Parquet en tu PC antes de borrarlas de Supabase.
+
+```bash
+# Instalar dependencia
+pip install duckdb
+
+# Activar en .env
+LOCAL_ARCHIVE_ENABLED=true
+LOCAL_ARCHIVE_DIR=./data/archive
+LOCAL_ARCHIVE_BEFORE_DELETE=false   # true = borra de Supabase tras archivar
+
+# Preview
+python scripts/archive_local.py --dry-run
+
+# Archivar
+python scripts/archive_local.py
+```
+
+Archivos generados: `data/archive/<tabla>/<YYYY-MM-DD>.parquet`
+
+---
+
+### Qué revisar si Supabase sigue creciendo
+
+1. Verificar que la migración 013 está aplicada:
+   ```sql
+   SELECT routine_name FROM information_schema.routines
+   WHERE routine_name IN ('cleanup_retention', 'cleanup_retention_preview');
+   ```
+
+2. Ver cuántas filas hay por tabla:
+   ```sql
+   SELECT 'odds_snapshots', COUNT(*) FROM odds_snapshots
+   UNION ALL SELECT 'fixture_contexts', COUNT(*) FROM fixture_contexts
+   UNION ALL SELECT 'fixtures', COUNT(*) FROM fixtures
+   UNION ALL SELECT 'pick_candidates', COUNT(*) FROM pick_candidates;
+   ```
+
+3. Revisar historial del cron:
+   ```sql
+   SELECT start_time, end_time, status, return_message
+   FROM cron.job_run_details ORDER BY start_time DESC LIMIT 10;
+   ```
+
+4. Forzar cleanup manual:
+   ```sql
+   SELECT * FROM cleanup_retention();
+   ```
+
+---
+
+### Borrar filas vs. reclamar espacio vs. VACUUM
+
+| Operación | Qué hace | Cuándo |
+|-----------|----------|--------|
+| `DELETE` (cleanup) | Marca filas como borradas; el espacio **no** se libera inmediatamente | En cada cleanup |
+| `VACUUM` | Reclama el espacio marcado; no bloquea lecturas | Automático en Supabase Free (autovacuum) |
+| `VACUUM FULL` | Reescribe la tabla y devuelve espacio al SO; bloquea la tabla | Solo en emergencias, con cuidado |
+| `ANALYZE` | Actualiza estadísticas del query planner | Automático o post-cleanup masivo |
+
+En Supabase Free, **autovacuum está activo** — no necesitas correr `VACUUM` manualmente.
+Después de borrados masivos, el autovacuum recupera el espacio en los siguientes minutos.
 
 ---
 

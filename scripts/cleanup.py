@@ -1,208 +1,117 @@
 #!/usr/bin/env python
-"""Retention cleanup — deletes stale hot-layer data to avoid DB bloat.
+"""Retention cleanup — applies TTL policy to Supabase hot/warm/cache tables.
 
-Retention policy:
-  odds_snapshots   — deleted 7 days after fixture kickoff (for finished matches)
-  fixture_contexts — deleted 14 days after fixture kickoff (for finished matches)
-  pick_candidates  — kept forever (historical audit trail)
-  published_picks  — kept forever
-  fixtures         — kept forever (catalog)
-  api_sync_runs    — kept for 90 days
-  api_usage_snapshots — kept for 30 days
-
-Finished match statuses (API-Football):
-  FT, AET, PEN, AWD, WO, CANC, ABD, POSTP
+Calls cleanup_retention() or cleanup_retention_preview() via Supabase RPC.
+TTL values are read from Settings (app/core/config.py / .env).
 
 Usage:
-    python scripts/cleanup.py
-    python scripts/cleanup.py --odds-days 7 --context-days 14 --dry-run
+    python scripts/cleanup.py           # real cleanup
+    python scripts/cleanup.py --dry-run # preview — nothing is deleted
 """
 
 import argparse
 import logging
 import os
 import sys
-from datetime import datetime, timedelta, timezone
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 try:
+    from app.core.config import settings
     from app.core.logger import setup_logger
-except ImportError as _e:
-    print(f"Error de importación: {_e}")
+    from app.data.repositories.supabase_client import get_supabase
+except ImportError as e:
+    print(f"Error de importación: {e}")
     sys.exit(1)
-
-from app.data.repositories.supabase_client import get_supabase
 
 logger = logging.getLogger(__name__)
 
-FINISHED_STATUSES = ("FT", "AET", "PEN", "AWD", "WO", "CANC", "ABD", "POSTP")
+
+def _rpc_params() -> dict:
+    return {
+        "p_fixtures_days":        settings.retention_fixtures_days,
+        "p_odds_days":            settings.retention_odds_days,
+        "p_context_days":         settings.retention_context_days,
+        "p_candidates_days":      settings.retention_candidates_days,
+        "p_published_picks_days": settings.retention_published_picks_days,
+        "p_settlement_days":      settings.retention_settlement_days,
+        "p_sync_runs_days":       settings.retention_sync_runs_days,
+        "p_usage_days":           settings.retention_usage_days,
+        "p_h2h_days":             settings.retention_h2h_days,
+        "p_team_metrics_days":    settings.retention_team_metrics_days,
+        "p_market_cache_days":    settings.retention_market_cache_days,
+        "p_cron_history_days":    settings.retention_cron_history_days,
+    }
 
 
-def _get_old_finished_fixture_ids(client, cutoff_days: int) -> list[int]:
-    """Return IDs of finished fixtures whose kickoff_at is older than cutoff_days."""
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=cutoff_days)).isoformat()
-    result = (
-        client.table("fixtures")
-        .select("id")
-        .lt("kickoff_at", cutoff)
-        .in_("status_short", list(FINISHED_STATUSES))
-        .execute()
-    )
-    return [row["id"] for row in (result.data or [])]
+def run_preview(client) -> list[dict]:
+    result = client.rpc("cleanup_retention_preview", _rpc_params()).execute()
+    return result.data or []
 
 
-def _delete_in_batches(client, table: str, column: str, ids: list[int], dry_run: bool) -> int:
-    """Delete rows from table WHERE column IN ids. Works in batches of 500."""
-    if not ids:
-        return 0
-    total = 0
-    batch_size = 500
-    for i in range(0, len(ids), batch_size):
-        batch = ids[i: i + batch_size]
-        if dry_run:
-            logger.info("[dry-run] Eliminaría %d filas de %s", len(batch), table)
-            total += len(batch)
-        else:
-            client.table(table).delete().in_(column, batch).execute()
-            total += len(batch)
-    return total
+def run_cleanup(client) -> list[dict]:
+    result = client.rpc("cleanup_retention", _rpc_params()).execute()
+    return result.data or []
 
 
-def cleanup_odds(client, days: int, dry_run: bool) -> int:
-    """Delete odds_snapshots for finished fixtures older than `days` days."""
-    fixture_ids = _get_old_finished_fixture_ids(client, days)
-    if not fixture_ids:
-        logger.info("cleanup_odds: sin fixtures candidatos (>%d días + terminados)", days)
-        return 0
-    n = _delete_in_batches(client, "odds_snapshots", "fixture_id", fixture_ids, dry_run)
-    logger.info(
-        "cleanup_odds: %s %d filas de odds_snapshots (%d fixtures, >%d días)",
-        "eliminaría" if dry_run else "eliminadas", n, len(fixture_ids), days,
-    )
-    return n
+def _print_summary(rows: list[dict], dry_run: bool, duration: float) -> None:
+    col_key = "rows_to_delete" if dry_run else "rows_deleted"
+    tag = "[DRY RUN]" if dry_run else "[REAL]"
+    total = sum(r.get(col_key, 0) or 0 for r in rows)
 
-
-def cleanup_contexts(client, days: int, dry_run: bool) -> int:
-    """Delete fixture_contexts for finished fixtures older than `days` days."""
-    fixture_ids = _get_old_finished_fixture_ids(client, days)
-    if not fixture_ids:
-        logger.info("cleanup_contexts: sin fixtures candidatos (>%d días + terminados)", days)
-        return 0
-    n = _delete_in_batches(client, "fixture_contexts", "fixture_id", fixture_ids, dry_run)
-    logger.info(
-        "cleanup_contexts: %s %d filas de fixture_contexts (%d fixtures, >%d días)",
-        "eliminaría" if dry_run else "eliminadas", n, len(fixture_ids), days,
-    )
-    return n
-
-
-def cleanup_sync_runs(client, days: int, dry_run: bool) -> int:
-    """Delete api_sync_runs older than `days` days (finished runs only)."""
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+    print(f"\n=== Cleanup {tag} — {duration:.1f}s ===")
+    for row in rows:
+        tbl = row.get("tbl", "?")
+        n = row.get(col_key, 0) or 0
+        verb = "eliminaría" if dry_run else "eliminadas"
+        marker = "  !" if n > 0 else "   "
+        print(f"{marker} {tbl:<34} {n:>6} filas {verb}")
+    print(f"   {'TOTAL':<34} {total:>6}")
     if dry_run:
-        result = (
-            client.table("api_sync_runs")
-            .select("id", count="exact")
-            .lt("started_at", cutoff)
-            .neq("status", "running")
-            .execute()
-        )
-        n = result.count or 0
-        logger.info("[dry-run] Eliminaría %d filas de api_sync_runs (>%d días)", n, days)
-        return n
-    else:
-        client.table("api_sync_runs").delete().lt("started_at", cutoff).neq("status", "running").execute()
-        logger.info("cleanup_sync_runs: eliminadas filas >%d días", days)
-        return 0  # PostgREST delete doesn't return count reliably
+        print("\n  Modo dry-run — sin cambios. Corre sin --dry-run para aplicar.")
+    archive_status = "activado" if settings.local_archive_enabled else "desactivado"
+    print(f"  Archivado local: {archive_status}")
+    print()
 
 
-def cleanup_usage_snapshots(client, days: int, dry_run: bool) -> int:
-    """Delete api_usage_snapshots older than `days` days."""
-    cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
-    if dry_run:
-        result = (
-            client.table("api_usage_snapshots")
-            .select("id", count="exact")
-            .lt("captured_at", cutoff)
-            .execute()
-        )
-        n = result.count or 0
-        logger.info("[dry-run] Eliminaría %d filas de api_usage_snapshots (>%d días)", n, days)
-        return n
-    else:
-        client.table("api_usage_snapshots").delete().lt("captured_at", cutoff).execute()
-        logger.info("cleanup_usage_snapshots: eliminadas filas >%d días", days)
-        return 0
-
-
-def main(
-    odds_days: int,
-    context_days: int,
-    sync_runs_days: int,
-    usage_days: int,
-    dry_run: bool,
-) -> None:
-    if dry_run:
-        logger.info("=== Cleanup (DRY RUN — no se elimina nada) ===")
-    else:
-        logger.info("=== Cleanup — iniciando limpieza de retención ===")
-
+def main(dry_run: bool) -> None:
     client = get_supabase()
+    t0 = time.monotonic()
 
-    n_odds = cleanup_odds(client, odds_days, dry_run)
-    n_ctx = cleanup_contexts(client, context_days, dry_run)
-    n_runs = cleanup_sync_runs(client, sync_runs_days, dry_run)
-    n_usage = cleanup_usage_snapshots(client, usage_days, dry_run)
+    if dry_run:
+        logger.info("Cleanup dry-run iniciado")
+        rows = run_preview(client)
+    else:
+        logger.info("Cleanup real iniciado")
+        rows = run_cleanup(client)
 
-    logger.info(
-        "=== Cleanup completado | odds=%d ctx=%d sync_runs=%d usage=%d ===",
-        n_odds, n_ctx, n_runs, n_usage,
-    )
+    duration = time.monotonic() - t0
+    _print_summary(rows, dry_run=dry_run, duration=duration)
+
+    if not dry_run:
+        logger.info("Cleanup completado en %.1fs", duration)
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
+    p = argparse.ArgumentParser(
         description="Retention cleanup for football-bot Supabase DB.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
-            "Deletes stale hot-layer data. Permanent data (fixtures, pick_candidates,\n"
-            "published_picks) is never deleted.\n\n"
+            "TTL values come from .env / Settings. Apply migration 013 first.\n\n"
             "Examples:\n"
             "  python scripts/cleanup.py --dry-run\n"
-            "  python scripts/cleanup.py --odds-days 7 --context-days 14\n"
+            "  python scripts/cleanup.py\n"
         ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument(
-        "--odds-days", default=7, type=int,
-        help="Delete odds_snapshots for finished fixtures older than N days (default: 7).",
-    )
-    parser.add_argument(
-        "--context-days", default=14, type=int,
-        help="Delete fixture_contexts for finished fixtures older than N days (default: 14).",
-    )
-    parser.add_argument(
-        "--sync-runs-days", default=90, type=int,
-        help="Delete api_sync_runs older than N days (default: 90).",
-    )
-    parser.add_argument(
-        "--usage-days", default=30, type=int,
-        help="Delete api_usage_snapshots older than N days (default: 30).",
-    )
-    parser.add_argument(
+    p.add_argument(
         "--dry-run", action="store_true",
-        help="Show what would be deleted without actually deleting anything.",
+        help="Preview rows to delete without deleting anything.",
     )
-    return parser.parse_args()
+    return p.parse_args()
 
 
 if __name__ == "__main__":
     setup_logger()
     args = parse_args()
-    main(
-        odds_days=args.odds_days,
-        context_days=args.context_days,
-        sync_runs_days=args.sync_runs_days,
-        usage_days=args.usage_days,
-        dry_run=args.dry_run,
-    )
+    main(dry_run=args.dry_run)

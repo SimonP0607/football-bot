@@ -72,6 +72,32 @@ class Settings:
     # name when set.  Find the ID from /odds/bookmakers or ref_bookmakers table.
     preferred_bookmaker_id: int = _int("PREFERRED_BOOKMAKER_ID", 0)
 
+    # ── Retención de datos ────────────────────────────────────────────────────
+    # Hot tier (TTL corto — 3 días por defecto)
+    retention_fixtures_days: int = _int("RETENTION_FIXTURES_DAYS", 3)
+    retention_odds_days: int = _int("RETENTION_ODDS_DAYS", 3)
+    retention_context_days: int = _int("RETENTION_CONTEXT_DAYS", 3)
+    retention_candidates_days: int = _int("RETENTION_CANDIDATES_DAYS", 3)
+    # Warm tier
+    retention_published_picks_days: int = _int("RETENTION_PUBLISHED_PICKS_DAYS", 45)
+    retention_settlement_days: int = _int("RETENTION_SETTLEMENT_DAYS", 90)
+    retention_sync_runs_days: int = _int("RETENTION_SYNC_RUNS_DAYS", 14)
+    retention_usage_days: int = _int("RETENTION_USAGE_DAYS", 14)
+    # Cache tier
+    retention_h2h_days: int = _int("RETENTION_H2H_DAYS", 30)
+    retention_team_metrics_days: int = _int("RETENTION_TEAM_METRICS_DAYS", 30)
+    retention_market_cache_days: int = _int("RETENTION_MARKET_CACHE_DAYS", 30)
+    # Cron history
+    retention_cron_history_days: int = _int("RETENTION_CRON_HISTORY_DAYS", 14)
+    # Archivado local (desactivado por defecto)
+    local_archive_enabled: bool = (
+        os.getenv("LOCAL_ARCHIVE_ENABLED", "false").lower() == "true"
+    )
+    local_archive_dir: str = os.getenv("LOCAL_ARCHIVE_DIR", "./data/archive")
+    local_archive_before_delete: bool = (
+        os.getenv("LOCAL_ARCHIVE_BEFORE_DELETE", "false").lower() == "true"
+    )
+
     def __post_init__(self) -> None:
         # Strip whitespace to catch copy-paste errors (trailing newlines, spaces)
         self.api_football_key = self.api_football_key.strip()

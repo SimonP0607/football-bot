@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(.venv/Scripts/python.exe -m pytest tests/ -v)"
+      "Bash(.venv/Scripts/python.exe -m pytest tests/ -v)",
+      "Bash(.venv/Scripts/python -c ' *)"
     ]
   }
 }
