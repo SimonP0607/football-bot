@@ -162,8 +162,14 @@ def main() -> None:
                    help="Seasonal Elo regression factor (0.0=disabled, 0.1=typical).")
     p.add_argument("--recent-weight", type=float, default=0.6, metavar="W",
                    help="Recency weight for most-recent training season (0.5=equal, 0.6=default, 1.0=only-recent).")
+    p.add_argument("--min-seasons", type=int, default=2, metavar="N",
+                   help="Minimo de temporadas totales en historia para procesar una liga (default: 2).")
+    p.add_argument("--min-fixtures", type=int, default=10, metavar="N",
+                   help="Minimo de fixtures completados en una temporada test (default: 10).")
     p.add_argument("--dry-run", action="store_true",
                    help="Calcula metricas sin escribir en DuckDB.")
+    p.add_argument("--force", action="store_true",
+                   help="Re-ejecutar aunque ya exista un run completado (evita dedup).")
     p.add_argument("--all-leagues", action="store_true",
                    help="Ejecutar backtest para todas las ligas en fixtures_history.")
     args = p.parse_args()
@@ -184,25 +190,53 @@ def main() -> None:
     else:
         league_ids = [args.league]
 
+    # ── counters for final summary (only meaningful for --all-leagues) ─────────
+    _summary: dict[str, list] = {
+        "processed":                   [],
+        "already_exists":              [],
+        "skipped_no_data":             [],
+        "skipped_insufficient_seasons": [],
+        "skipped_no_test_data":        [],
+        "error":                       [],
+    }
+
     any_ok = False
     for league_id in league_ids:
+        league_label = str(league_id)
         print(f"\nProcesando liga {league_id}...")
-        result = run_backtest(
-            league_id,
-            dry_run=args.dry_run,
-            only_season=args.season,
-            train_seasons=args.train_seasons,
-            min_model_prob=args.min_model_prob,
-            max_daily_picks=args.max_daily_picks,
-            rho=args.rho,
-            elo_season_regress=args.elo_regress,
-            recent_weight=args.recent_weight,
-        )
+        try:
+            result = run_backtest(
+                league_id,
+                dry_run=args.dry_run,
+                force=args.force,
+                only_season=args.season,
+                train_seasons=args.train_seasons,
+                min_model_prob=args.min_model_prob,
+                max_daily_picks=args.max_daily_picks,
+                rho=args.rho,
+                elo_season_regress=args.elo_regress,
+                recent_weight=args.recent_weight,
+                min_seasons=args.min_seasons,
+                min_fixtures_per_season=args.min_fixtures,
+            )
+        except Exception as exc:
+            reason = str(exc)[:120]
+            print(f"  ERROR: {reason}")
+            _summary["error"].append({"league_id": league_id, "reason": reason})
+            continue
 
         status = result.get("status", "ok")
 
+        if status == "already_exists":
+            name = result.get("league_name", league_label)
+            print(f"  Ya completado ({result['run_name']}). Usa --force para re-ejecutar.")
+            _summary["already_exists"].append(league_id)
+            any_ok = True  # not an error; data already exists
+            continue
+
         if status == "no_data":
             print(f"  Sin datos para liga {league_id}. Ejecuta backfill_history_api.py.")
+            _summary["skipped_no_data"].append(league_id)
             continue
 
         if status == "season_not_found":
@@ -210,6 +244,7 @@ def main() -> None:
                 f"  Temporada {result.get('season')} no encontrada en DuckDB "
                 f"para liga {league_id}."
             )
+            _summary["skipped_no_data"].append(league_id)
             continue
 
         if status == "insufficient_seasons":
@@ -219,10 +254,55 @@ def main() -> None:
                 f"  Temporadas insuficientes para liga {league_id}: "
                 f"disponibles={avail}, necesarias={needed}."
             )
+            _summary["skipped_insufficient_seasons"].append(league_id)
+            continue
+
+        if status == "no_test_data":
+            print(
+                f"  Liga {league_id}: sin fixtures suficientes en temporadas test "
+                f"(min_fixtures={args.min_fixtures}). Elo actualizado igual."
+            )
+            _summary["skipped_no_test_data"].append(league_id)
             continue
 
         _print_report(result)
+        _summary["processed"].append({
+            "league_id":   league_id,
+            "league_name": result.get("league_name", ""),
+            "samples":     result.get("total_samples", 0),
+            "run_id":      result.get("run_id"),
+        })
         any_ok = True
+
+    # ── Final summary (only printed for --all-leagues) ─────────────────────
+    if args.all_leagues:
+        conn2 = get_local_db()
+        ts_count = conn2.execute("SELECT COUNT(*) FROM training_samples").fetchone()[0]
+        bm_count = conn2.execute("SELECT COUNT(*) FROM backtest_metrics").fetchone()[0]
+
+        print(f"\n{'=' * 60}")
+        print(f"  RESUMEN MULTI-LIGA")
+        print(f"  Total ligas detectadas       : {len(league_ids)}")
+        print(f"  Procesadas (nuevas)          : {len(_summary['processed'])}")
+        print(f"  Ya existentes (skip dedup)   : {len(_summary['already_exists'])}")
+        print(f"  Sin datos suficientes        : {len(_summary['skipped_no_data'])}")
+        print(f"  Temporadas insuficientes     : {len(_summary['skipped_insufficient_seasons'])}")
+        print(f"  Sin test data                : {len(_summary['skipped_no_test_data'])}")
+        print(f"  Errores                      : {len(_summary['error'])}")
+        print(f"  training_samples total (DB)  : {ts_count}")
+        print(f"  backtest_metrics total (DB)  : {bm_count}")
+
+        if _summary["processed"]:
+            print(f"\n  PROCESADAS:")
+            for p in _summary["processed"]:
+                print(f"    liga={p['league_id']:>4}  {p['league_name'][:28]:<28}  samples={p['samples']:>5}  run_id={p['run_id']}")
+
+        if _summary["error"]:
+            print(f"\n  ERRORES:")
+            for e in _summary["error"]:
+                print(f"    liga={e['league_id']:>4}  {e['reason']}")
+
+        print(f"{'=' * 60}")
 
     if not any_ok:
         sys.exit(3)

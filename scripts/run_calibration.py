@@ -47,24 +47,44 @@ def _print_summary(summaries: list[dict]) -> None:
         print("  (sin calibradores entrenados)")
         return
 
-    header = (
-        f"  {'Mercado':<6}  {'Scope':<8}  {'Liga':>6}  {'N':>5}  "
-        f"{'ECE-antes':>10}  {'ECE-despues':>12}  {'Delta':>8}"
-    )
+    has_val = any("val_ece" in s and s.get("val_ece") is not None for s in summaries)
+
+    if has_val:
+        header = (
+            f"  {'Mercado':<6}  {'Scope':<8}  {'Liga':>6}  {'N':>5}  "
+            f"{'ECE-train':>10}  {'ECE-val':>9}  {'val-Brier':>10}  {'val-LL':>8}"
+        )
+    else:
+        header = (
+            f"  {'Mercado':<6}  {'Scope':<8}  {'Liga':>6}  {'N':>5}  "
+            f"{'ECE-antes':>10}  {'ECE-despues':>12}  {'Delta':>8}"
+        )
     sep = "  " + "-" * (len(header) - 2)
     print(header)
     print(sep)
 
     for s in summaries:
-        liga  = str(s.get("provider_league_id") or "global")
-        delta = s["ece_after"] - s["ece_before"]
-        sign  = "+" if delta >= 0 else ""
-        print(
-            f"  {s['market_key']:<6}  {s['scope']:<8}  {liga:>6}  "
-            f"{s['n_train']:>5}  "
-            f"{s['ece_before']:>10.4f}  {s['ece_after']:>12.4f}  "
-            f"{sign}{delta:>+7.4f}"
-        )
+        liga = str(s.get("provider_league_id") or "global")
+        if has_val:
+            val_ece    = s.get("val_ece")
+            val_brier  = s.get("val_brier")
+            val_logloss = s.get("val_logloss")
+            ve_str  = f"{val_ece:.4f}"   if val_ece   is not None else "   --  "
+            vb_str  = f"{val_brier:.4f}" if val_brier  is not None else "   --  "
+            vll_str = f"{val_logloss:.4f}" if val_logloss is not None else "   --  "
+            print(
+                f"  {s['market_key']:<6}  {s['scope']:<8}  {liga:>6}  "
+                f"{s['n_train']:>5}  "
+                f"{s['ece_after']:>10.4f}  {ve_str:>9}  {vb_str:>10}  {vll_str:>8}"
+            )
+        else:
+            delta = s["ece_after"] - s["ece_before"]
+            print(
+                f"  {s['market_key']:<6}  {s['scope']:<8}  {liga:>6}  "
+                f"{s['n_train']:>5}  "
+                f"{s['ece_before']:>10.4f}  {s['ece_after']:>12.4f}  "
+                f"{delta:>+8.4f}"
+            )
     print(sep)
 
 
@@ -120,6 +140,10 @@ def main() -> None:
                    help="Minimo de muestras para calibrador global (default: 100).")
     p.add_argument("--market", type=str, nargs="+", default=None, metavar="MKT",
                    help="Mercados especificos (ej: 1X2 OU25). Default: todos.")
+    p.add_argument("--val-season", type=int, default=None, metavar="YEAR",
+                   help="Temporada a usar como validacion out-of-sample (ej: 2024). "
+                        "El calibrador se entrena en todas las OTRAS temporadas y se "
+                        "evalua en esta para reportar ECE/Brier/LogLoss reales.")
     args = p.parse_args()
 
     if not args.league and not args.all_leagues:
@@ -161,6 +185,8 @@ def main() -> None:
     print(f"  Muestras : {n_samples}  n_bins={args.n_bins}")
     if args.run_id:
         print(f"  Run ID   : {args.run_id}")
+    if args.val_season:
+        print(f"  Val Season: {args.val_season}  (held-out para ECE/Brier real)")
     print(f"{'=' * 68}\n")
 
     summaries = train_and_store(
@@ -171,6 +197,7 @@ def main() -> None:
         n_bins=args.n_bins,
         min_samples_league=args.min_samples_league,
         min_samples_global=args.min_samples_global,
+        val_season=args.val_season,
     )
 
     print(f"  {len(summaries)} calibradores entrenados\n")

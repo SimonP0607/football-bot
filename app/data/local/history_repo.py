@@ -265,6 +265,17 @@ def create_backtest_run(
     return run_id
 
 
+def get_completed_backtest_run(
+    conn: duckdb.DuckDBPyConnection, run_name: str
+) -> int | None:
+    """Return the id of an existing completed backtest run with this name, or None."""
+    row = conn.execute(
+        "SELECT id FROM backtest_runs WHERE run_name = ? AND status = 'completed' LIMIT 1",
+        [run_name],
+    ).fetchone()
+    return row[0] if row else None
+
+
 def finish_backtest_run(
     conn: duckdb.DuckDBPyConnection,
     run_id: int,
@@ -605,6 +616,18 @@ def get_fixtures_for_season(
     ]
 
 
+def _empty_team_stats() -> dict:
+    """Return a zero-filled team stats dict with all expected keys."""
+    return {
+        "home_scored":   0.0,
+        "home_conceded": 0.0,
+        "home_games":    0,
+        "away_scored":   0.0,
+        "away_conceded": 0.0,
+        "away_games":    0,
+    }
+
+
 def get_team_goals_stats(
     conn: duckdb.DuckDBPyConnection,
     provider_league_id: int,
@@ -613,7 +636,11 @@ def get_team_goals_stats(
     """Return per-team goal averages aggregated from fixtures_history.
 
     Covers all seasons in the list (training window). Only includes fixtures
-    with non-NULL goals. Returns a dict keyed by team_id:
+    with non-NULL goals. Returns a dict keyed by team_id. Every entry
+    always contains all six keys (home/away × scored/conceded/games) even if
+    a team only appeared as home or only as away in the training window —
+    in that case the missing side defaults to 0.0/0.
+
         {
             'home_scored':   float,  # avg goals scored as home team
             'home_conceded': float,  # avg goals conceded as home team
@@ -659,17 +686,15 @@ def get_team_goals_stats(
 
     result: dict[int, dict] = {}
     for team_id, home_scored, home_conceded, home_games in home_rows:
-        result.setdefault(team_id, {}).update(
-            home_scored=home_scored or 0.0,
-            home_conceded=home_conceded or 0.0,
-            home_games=home_games,
-        )
+        entry = result.setdefault(team_id, _empty_team_stats())
+        entry["home_scored"]   = home_scored   or 0.0
+        entry["home_conceded"] = home_conceded or 0.0
+        entry["home_games"]    = home_games
     for team_id, away_scored, away_conceded, away_games in away_rows:
-        result.setdefault(team_id, {}).update(
-            away_scored=away_scored or 0.0,
-            away_conceded=away_conceded or 0.0,
-            away_games=away_games,
-        )
+        entry = result.setdefault(team_id, _empty_team_stats())
+        entry["away_scored"]   = away_scored   or 0.0
+        entry["away_conceded"] = away_conceded or 0.0
+        entry["away_games"]    = away_games
     return result
 
 
@@ -823,17 +848,17 @@ def get_team_goals_stats_weighted(
         o = older.get(tid)
         if r and o:
             blended[tid] = {
-                "home_scored":   w * r["home_scored"]   + (1 - w) * o["home_scored"],
-                "home_conceded": w * r["home_conceded"] + (1 - w) * o["home_conceded"],
-                "home_games":    r["home_games"]  + o["home_games"],
-                "away_scored":   w * r["away_scored"]   + (1 - w) * o["away_scored"],
-                "away_conceded": w * r["away_conceded"] + (1 - w) * o["away_conceded"],
-                "away_games":    r["away_games"]  + o["away_games"],
+                "home_scored":   w * r.get("home_scored",   0.0) + (1 - w) * o.get("home_scored",   0.0),
+                "home_conceded": w * r.get("home_conceded", 0.0) + (1 - w) * o.get("home_conceded", 0.0),
+                "home_games":    r.get("home_games", 0) + o.get("home_games", 0),
+                "away_scored":   w * r.get("away_scored",   0.0) + (1 - w) * o.get("away_scored",   0.0),
+                "away_conceded": w * r.get("away_conceded", 0.0) + (1 - w) * o.get("away_conceded", 0.0),
+                "away_games":    r.get("away_games", 0) + o.get("away_games", 0),
             }
         elif r:
-            blended[tid] = r
+            blended[tid] = {**_empty_team_stats(), **r}
         else:
-            blended[tid] = o  # type: ignore[assignment]
+            blended[tid] = {**_empty_team_stats(), **o}  # type: ignore[arg-type]
     return blended
 
 
@@ -926,6 +951,65 @@ def get_shadow_value_picks(
             "risk_score":        r[11],
             "quality_score":     r[12],
             "decision_status":   r[13],
+        }
+        for r in rows
+    ]
+
+
+# ── Phase 5.5: historical odds queries ───────────────────────────────────────
+
+
+def get_best_odds_for_fixture(
+    conn: duckdb.DuckDBPyConnection,
+    fixture_history_id: int,
+    market_key: str,
+    selection: str,
+) -> float | None:
+    """Return the best (highest) available odd for a fixture/market/selection.
+
+    Queries odds_history populated via backfill_history_api (Phase 5.5).
+    Returns None if no odds are recorded yet.
+    """
+    row = conn.execute(
+        """
+        SELECT MAX(odd)
+        FROM odds_history
+        WHERE fixture_history_id = ?
+          AND market_key = ?
+          AND selection = ?
+          AND odd IS NOT NULL
+        """,
+        [fixture_history_id, market_key, selection],
+    ).fetchone()
+    return row[0] if row and row[0] is not None else None
+
+
+def get_market_odds(
+    conn: duckdb.DuckDBPyConnection,
+    fixture_history_id: int,
+    market_key: str,
+) -> list[dict[str, Any]]:
+    """Return all bookmaker odds for a fixture/market, ordered by selection then odd.
+
+    Queries odds_history. Returns empty list if no odds are recorded.
+    """
+    rows = conn.execute(
+        """
+        SELECT selection, bookmaker_name, odd, implied_probability, scope
+        FROM odds_history
+        WHERE fixture_history_id = ?
+          AND market_key = ?
+        ORDER BY selection, odd DESC
+        """,
+        [fixture_history_id, market_key],
+    ).fetchall()
+    return [
+        {
+            "selection":          r[0],
+            "bookmaker_name":     r[1],
+            "odd":                r[2],
+            "implied_probability": r[3],
+            "scope":              r[4],
         }
         for r in rows
     ]

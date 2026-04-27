@@ -92,3 +92,18 @@ CREATE TABLE IF NOT EXISTS shadow_value_picks (
 
 CREATE INDEX IF NOT EXISTS shadow_picks_date_idx
     ON shadow_value_picks (run_date, provider_league_id);
+
+-- ── Fase B: out-of-sample validation columns ──────────────────────────────────
+-- Added after initial release. ALTER TABLE ... IF NOT EXISTS is idempotent.
+
+ALTER TABLE calibration_registry ADD COLUMN IF NOT EXISTS n_val       INTEGER;
+ALTER TABLE calibration_registry ADD COLUMN IF NOT EXISTS val_ece     DOUBLE;
+ALTER TABLE calibration_registry ADD COLUMN IF NOT EXISTS val_brier   DOUBLE;
+ALTER TABLE calibration_registry ADD COLUMN IF NOT EXISTS val_logloss DOUBLE;
+
+-- ── Fase C: shadow pick grading columns ───────────────────────────────────────
+-- Populated by settle_shadow_picks() after fixture scores are known.
+
+ALTER TABLE shadow_value_picks ADD COLUMN IF NOT EXISTS actual_outcome VARCHAR;
+ALTER TABLE shadow_value_picks ADD COLUMN IF NOT EXISTS model_correct  BOOLEAN;
+ALTER TABLE shadow_value_picks ADD COLUMN IF NOT EXISTS graded_at      VARCHAR;

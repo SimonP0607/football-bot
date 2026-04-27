@@ -52,6 +52,13 @@ MIN_QUAL = 0.10   # minimum quality_score (= w_rel * p_cal)
 # ── Per-pick evaluation ────────────────────────────────────────────────────────
 
 
+_DC_COVERS: dict[str, frozenset[str]] = {
+    "1X": frozenset({"Home", "Draw"}),
+    "X2": frozenset({"Draw", "Away"}),
+    "12": frozenset({"Home", "Away"}),
+}
+
+
 def _evaluate_pick(
     conn,
     *,
@@ -61,12 +68,15 @@ def _evaluate_pick(
     entity_type: str,
     competition_type: str | None,
     provider_league_id: int,
+    offered_odds: float | None = None,
 ) -> dict:
     """Compute all value metrics for a single market pick.
 
     Returns dict with p_raw, p_cal, fair_odds, w_rel, risk_score,
     quality_score, and NULL odds-dependent fields.
     Includes internal keys '_calibrated' (bool) and '_meta' (calibrator info).
+
+    offered_odds: Phase 5.5 — if provided, activates p_mkt, edge, ev, ev_adj.
     """
     params, meta = get_calibrator_for_pick(
         conn,
@@ -82,18 +92,29 @@ def _evaluate_pick(
     risk_score    = round(1.0 - p_cal, 4)
     quality_score = round(w_rel * p_cal, 4)
 
+    # Phase 5.5: activate odds-dependent metrics when offered_odds is known
+    p_mkt  = None
+    edge   = None
+    ev     = None
+    ev_adj = None
+    if offered_odds is not None and offered_odds > 1.0:
+        p_mkt  = round(1.0 / offered_odds, 6)
+        edge   = round(p_cal - p_mkt, 6)
+        ev     = round(p_cal * offered_odds - 1.0, 6)
+        ev_adj = round(w_rel * ev, 6)
+
     return {
         "market_key":    market_key,
         "selection":     selection,
         "p_raw":         round(p_raw, 6),
         "p_cal":         round(p_cal, 6),
-        "p_mkt":         None,
+        "p_mkt":         p_mkt,
         "p_adj":         round(p_cal, 6),  # equals p_cal when no market odds
         "fair_odds":     fair_odds,
-        "offered_odds":  None,
-        "edge":          None,
-        "ev":            None,
-        "ev_adj":        None,
+        "offered_odds":  offered_odds,
+        "edge":          edge,
+        "ev":            ev,
+        "ev_adj":        ev_adj,
         "w_rel":         w_rel,
         "risk_score":    risk_score,
         "quality_score": quality_score,
@@ -161,6 +182,7 @@ def evaluate_fixture(
     run_date: str | None = None,
     fixture_id: int | None = None,
     persist: bool = True,
+    odds_lookup: dict | None = None,
 ) -> dict:
     """Evaluate all market picks for a fixture and select the best one.
 
@@ -174,6 +196,8 @@ def evaluate_fixture(
         run_date:           ISO date string (default: today)
         fixture_id:         optional reference ID
         persist:            write candidates to shadow_value_picks (default True)
+        odds_lookup:        Phase 5.5 — {market_key: best_offered_odds}; when set,
+                            activates p_mkt, edge, ev, ev_adj computation.
 
     Returns:
         dict with:
@@ -185,6 +209,7 @@ def evaluate_fixture(
 
     candidates: list[dict] = []
     for market_key, pk in fixture_picks.items():
+        offered = (odds_lookup or {}).get(market_key)
         pick = _evaluate_pick(
             conn,
             market_key=market_key,
@@ -193,6 +218,7 @@ def evaluate_fixture(
             entity_type=entity_type,
             competition_type=competition_type,
             provider_league_id=provider_league_id,
+            offered_odds=offered,
         )
         pick["fixture_id"] = fixture_id
         candidates.append(pick)
@@ -235,3 +261,112 @@ def evaluate_fixture(
         "selected":   selected,
         "run_date":   run_date,
     }
+
+
+# ── Fase C: shadow pick grading ────────────────────────────────────────────────
+
+
+def settle_shadow_picks(conn) -> dict:
+    """Grade ungraded shadow picks against completed fixture scores.
+
+    Queries shadow_value_picks WHERE model_correct IS NULL AND fixture_id IS NOT NULL,
+    looks up goals in fixtures_history, resolves actual outcome per market,
+    and writes actual_outcome + model_correct + graded_at back.
+
+    Returns summary: {total, graded, no_score}
+    """
+    from datetime import date as _date
+
+    rows = conn.execute(
+        """
+        SELECT id, fixture_id, market_key, selection
+        FROM shadow_value_picks
+        WHERE model_correct IS NULL
+          AND fixture_id IS NOT NULL
+        ORDER BY id
+        """
+    ).fetchall()
+
+    if not rows:
+        return {"total": 0, "graded": 0, "no_score": 0}
+
+    today = str(_date.today())
+    graded = 0
+    no_score = 0
+
+    for pick_id, fixture_id, market_key, selection in rows:
+        score_row = conn.execute(
+            """
+            SELECT goals_home, goals_away
+            FROM fixtures_history
+            WHERE id = ?
+              AND goals_home IS NOT NULL AND goals_away IS NOT NULL
+            """,
+            [fixture_id],
+        ).fetchone()
+
+        if score_row is None:
+            no_score += 1
+            continue
+
+        goals_home, goals_away = score_row
+        result_1x2 = (
+            "Home" if goals_home > goals_away
+            else "Draw" if goals_home == goals_away
+            else "Away"
+        )
+        actual_map = {
+            "1X2":  result_1x2,
+            "DC":   result_1x2,
+            "OU25": "Over 2.5" if (goals_home + goals_away) > 2 else "Under 2.5",
+            "BTTS": "Yes" if goals_home > 0 and goals_away > 0 else "No",
+        }
+        actual_outcome = actual_map.get(market_key)
+        if actual_outcome is None:
+            no_score += 1
+            continue
+
+        if market_key == "DC":
+            correct = actual_outcome in _DC_COVERS.get(selection, frozenset())
+        else:
+            correct = selection == actual_outcome
+
+        conn.execute(
+            """
+            UPDATE shadow_value_picks
+            SET actual_outcome = ?, model_correct = ?, graded_at = ?
+            WHERE id = ?
+            """,
+            [actual_outcome, correct, today, pick_id],
+        )
+        graded += 1
+
+    logger.info("settle_shadow_picks: %d gradados de %d (%d sin score)", graded, len(rows), no_score)
+    return {"total": len(rows), "graded": graded, "no_score": no_score}
+
+
+def shadow_picks_grade_summary(conn) -> list[dict]:
+    """Hit-rate summary per market/league for graded shadow picks."""
+    rows = conn.execute(
+        """
+        SELECT
+            provider_league_id,
+            market_key,
+            COUNT(*)                                    AS n_graded,
+            SUM(CAST(model_correct AS INTEGER))         AS n_correct
+        FROM shadow_value_picks
+        WHERE model_correct IS NOT NULL
+        GROUP BY provider_league_id, market_key
+        ORDER BY provider_league_id, market_key
+        """
+    ).fetchall()
+    return [
+        {
+            "provider_league_id": r[0],
+            "market_key":         r[1],
+            "n_graded":           r[2],
+            "n_correct":          int(r[3]) if r[3] is not None else 0,
+            "hit_rate":           round(r[3] / r[2], 4) if r[2] and r[3] is not None else None,
+        }
+        for r in rows
+    ]

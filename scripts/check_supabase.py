@@ -20,16 +20,23 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dotenv import load_dotenv
 load_dotenv()
 
-# Required tables per the SQL schema
+# Required tables — mirrors CRITICAL_TABLES in app/data/db_health.py
 REQUIRED_TABLES = [
     "bot_users",
-    "leagues",
+    "competitions",
+    "competition_seasons",
+    "tracked_competitions",
     "teams",
     "fixtures",
+    "fixture_contexts",
     "odds_snapshots",
-    "predictions",
-    "prediction_results",
-    "bot_logs",
+    "pick_candidates",
+    "published_picks",
+    "pick_results",
+    "ref_bookmakers",
+    "ref_bet_types",
+    "api_sync_runs",
+    "api_usage_snapshots",
 ]
 
 
@@ -81,7 +88,7 @@ def main() -> bool:
 
     print("\n[ 3 ] Conteos actuales")
     try:
-        for table in ("fixtures", "odds_snapshots", "predictions"):
+        for table in ("fixtures", "odds_snapshots", "pick_candidates", "published_picks"):
             result = client.table(table).select("id", count="exact").execute()
             print(f"  {table:<22} {result.count or 0} filas")
     except Exception as exc:
@@ -94,8 +101,10 @@ def main() -> bool:
         print(
             "❌  Algunas tablas no existen. Aplica las migraciones SQL:\n"
             "    Supabase → SQL Editor → pega y ejecuta:\n"
-            "      sql/migrations/001_init.sql\n"
-            "      sql/migrations/002_constraints_and_indexes.sql"
+            "      sql/migrations/010_production_schema.sql  (instala limpia)\n"
+            "      sql/migrations/011_sync_tier.sql\n"
+            "      sql/migrations/012_settlement.sql\n"
+            "      sql/migrations/013_retention_cleanup.sql"
         )
     return tables_ok
 

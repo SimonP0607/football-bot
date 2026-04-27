@@ -42,6 +42,10 @@ EXPECTED_TABLES = [
     "competition_context",
     "team_elo_history",
     "training_samples",
+    # 003_value_engine_schema.sql
+    "calibration_registry",
+    "market_quality_summary",
+    "shadow_value_picks",
 ]
 
 

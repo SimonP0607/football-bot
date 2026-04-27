@@ -22,7 +22,6 @@ from __future__ import annotations
 import json
 import logging
 import math
-from datetime import datetime, timezone
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -203,21 +202,31 @@ def compute_w_rel(calib_meta: dict | None) -> float:
     Higher w_rel = more trust in calibrated probability vs. market odds.
     In Phase 5 (no odds), used as quality indicator and ranking signal.
 
+    Uses val_ece (out-of-sample) when available — more reliable than training
+    ece_after which overfits by construction. Falls back to ece_after.
+
     Formula:
         sample_size_score   = min(1.0, n_train / 500)
-        calibration_quality = max(0.0, 1.0 - ece_after * 8.0)
+        calibration_quality = max(0.0, 1.0 - ece * 8.0)   # ece = val or train
         w_rel = 0.5 * sample_size_score + 0.5 * calibration_quality
     """
     if calib_meta is None:
         return 0.10
     n = calib_meta.get("n_train", 0)
-    ece_after = calib_meta.get("ece_after", 0.20)
+    ece = calib_meta.get("val_ece") or calib_meta.get("ece_after", 0.20)
     sample_score  = min(1.0, n / 500.0)
-    calib_quality = max(0.0, 1.0 - ece_after * 8.0)
+    calib_quality = max(0.0, 1.0 - ece * 8.0)
     return round(min(1.0, 0.5 * sample_score + 0.5 * calib_quality), 4)
 
 
 # ── DB helpers ─────────────────────────────────────────────────────────────────
+
+
+def _apply_bins(bins: list[dict], p: float) -> float:
+    """Apply calibrator bin list to a raw probability (nearest-bin lookup)."""
+    n = len(bins)
+    b = min(int(p * n), n - 1)
+    return bins[b]["calibrated"]
 
 
 def _fetch_training_samples(
@@ -227,11 +236,13 @@ def _fetch_training_samples(
     provider_league_id: int | None = None,
     entity_type: str = "club",
     run_id: int | None = None,
+    exclude_season: int | None = None,
 ) -> list[tuple[float, bool]]:
     """Load (model_probability, model_correct) pairs from training_samples.
 
     Joins competition_context to filter by entity_scope.
     Rows with NULL entity_scope default to 'club'.
+    exclude_season: omit rows from this season (used for out-of-sample splits).
     """
     filters = ["ts.market_key = ?", "COALESCE(cc.entity_scope, 'club') = ?"]
     params: list = [market_key, entity_type]
@@ -242,6 +253,9 @@ def _fetch_training_samples(
     if run_id is not None:
         filters.append("ts.backtest_run_id = ?")
         params.append(run_id)
+    if exclude_season is not None:
+        filters.append("ts.season != ?")
+        params.append(exclude_season)
 
     where = " AND ".join(filters)
     rows = conn.execute(
@@ -299,18 +313,27 @@ def _store_calibrator(
     competition_type: str | None,
     provider_league_id: int | None,
     method: str = "histogram_isotonic",
+    n_val: int | None = None,
+    val_ece: float | None = None,
+    val_brier: float | None = None,
+    val_logloss: float | None = None,
 ) -> int:
-    """Insert a calibration_registry row. Returns the new id."""
+    """Insert a calibration_registry row. Returns the new id.
+
+    trained_at uses DuckDB DEFAULT current_timestamp — avoids pytz dependency
+    when the column is later queried with CAST(trained_at AS VARCHAR).
+    val_* fields are populated only when a held-out val_season is provided.
+    """
     conn.execute(
         """
         INSERT INTO calibration_registry (
-            trained_at, market_key, entity_type, competition_type,
+            market_key, entity_type, competition_type,
             provider_league_id, method, n_train,
-            ece_before, ece_after, logloss_before, logloss_after, params_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ece_before, ece_after, logloss_before, logloss_after, params_json,
+            n_val, val_ece, val_brier, val_logloss
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         [
-            datetime.now(timezone.utc).isoformat(),
             market_key,
             entity_type,
             competition_type,
@@ -322,6 +345,10 @@ def _store_calibrator(
             result["logloss_before"],
             result["logloss_after"],
             json.dumps({"bins": result["bins"]}),
+            n_val,
+            val_ece,
+            val_brier,
+            val_logloss,
         ],
     )
     row = conn.execute("SELECT currval('seq_calibration')").fetchone()
@@ -405,16 +432,21 @@ def get_calibrator_for_pick(
             "ece_after":      row[3],
             "logloss_before": row[4],
             "logloss_after":  row[5],
+            "n_val":          row[6],
+            "val_ece":        row[7],
+            "val_brier":      row[8],
+            "val_logloss":    row[9],
         }
 
     if provider_league_id is not None:
         row = conn.execute(
             """
             SELECT params_json, n_train, ece_before, ece_after,
-                   logloss_before, logloss_after
+                   logloss_before, logloss_after,
+                   n_val, val_ece, val_brier, val_logloss
             FROM calibration_registry
             WHERE market_key = ? AND entity_type = ? AND provider_league_id = ?
-            ORDER BY trained_at DESC LIMIT 1
+            ORDER BY CAST(trained_at AS VARCHAR) DESC LIMIT 1
             """,
             [market_key, entity_type, provider_league_id],
         ).fetchone()
@@ -424,11 +456,12 @@ def get_calibrator_for_pick(
     row = conn.execute(
         """
         SELECT params_json, n_train, ece_before, ece_after,
-               logloss_before, logloss_after
+               logloss_before, logloss_after,
+               n_val, val_ece, val_brier, val_logloss
         FROM calibration_registry
         WHERE market_key = ? AND entity_type = ?
           AND provider_league_id IS NULL AND competition_type IS NULL
-        ORDER BY trained_at DESC LIMIT 1
+        ORDER BY CAST(trained_at AS VARCHAR) DESC LIMIT 1
         """,
         [market_key, entity_type],
     ).fetchone()
@@ -436,6 +469,22 @@ def get_calibrator_for_pick(
         return json.loads(row[0]), _row_to_meta(row)
 
     return None, None
+
+
+def _compute_val_metrics(
+    bins: list[dict],
+    val_samples: list[tuple[float, bool]],
+) -> dict:
+    """Apply trained bins to val_samples and return out-of-sample metrics."""
+    if not val_samples:
+        return {}
+    cal_val = [(_apply_bins(bins, p), c) for p, c in val_samples]
+    return {
+        "n_val":      len(val_samples),
+        "val_ece":    _compute_ece(cal_val),
+        "val_brier":  _compute_brier(cal_val),
+        "val_logloss": _compute_logloss(cal_val),
+    }
 
 
 def train_and_store(
@@ -447,6 +496,7 @@ def train_and_store(
     n_bins: int = _N_BINS_DEFAULT,
     min_samples_league: int = _MIN_SAMPLES_LEAGUE,
     min_samples_global: int = _MIN_SAMPLES_GLOBAL,
+    val_season: int | None = None,
 ) -> list[dict]:
     """Train calibrators from training_samples and store in calibration_registry.
 
@@ -464,9 +514,14 @@ def train_and_store(
         n_bins:              histogram resolution (default 10)
         min_samples_league:  threshold for league-specific calibrator
         min_samples_global:  threshold for entity-type global calibrator
+        val_season:          if set, this season is held out for validation;
+                             calibrator trains on all OTHER seasons and is
+                             evaluated on val_season → real ECE/Brier/logloss
 
     Returns:
         List of summary dicts — one per trained calibrator, ordered league first.
+        When val_season is set, each dict also contains n_val, val_ece,
+        val_brier, val_logloss.
     """
     from app.data.local import history_repo
     from app.services.backtest_service import MARKETS
@@ -492,6 +547,7 @@ def train_and_store(
                     provider_league_id=league_id,
                     entity_type=entity_type,
                     run_id=run_id,
+                    exclude_season=val_season,
                 )
 
                 # Populate market_quality_summary per season regardless of threshold
@@ -517,27 +573,34 @@ def train_and_store(
                     continue
 
                 result = train_calibrator(samples, n_bins=n_bins)
+
+                val_samples = by_season.get(val_season, []) if val_season else []
+                val_meta = _compute_val_metrics(result["bins"], val_samples)
+
                 _id = _store_calibrator(
                     conn, result,
                     market_key=market_key,
                     entity_type=entity_type,
                     competition_type=competition_type,
                     provider_league_id=league_id,
+                    **val_meta,
                 )
                 summaries.append({
-                    "id":                _id,
-                    "market_key":        market_key,
-                    "entity_type":       entity_type,
+                    "id":                 _id,
+                    "market_key":         market_key,
+                    "entity_type":        entity_type,
                     "provider_league_id": league_id,
-                    "scope":             "league",
-                    "n_train":           result["n_train"],
-                    "ece_before":        result["ece_before"],
-                    "ece_after":         result["ece_after"],
+                    "scope":              "league",
+                    "n_train":            result["n_train"],
+                    "ece_before":         result["ece_before"],
+                    "ece_after":          result["ece_after"],
+                    **val_meta,
                 })
                 logger.info(
-                    "calib: league %d / %s / %s  n=%d  ECE %.4f->%.4f",
+                    "calib: league %d / %s / %s  n=%d  ECE %.4f->%.4f%s",
                     league_id, market_key, entity_type,
                     result["n_train"], result["ece_before"], result["ece_after"],
+                    f"  val_ECE={val_meta['val_ece']:.4f}" if val_meta else "",
                 )
 
             # ── Entity-type global calibrator ──────────────────────────────────
@@ -545,30 +608,43 @@ def train_and_store(
                 conn, market_key,
                 entity_type=entity_type,
                 run_id=run_id,
+                exclude_season=val_season,
             )
             if len(global_samples) >= min_samples_global:
                 result = train_calibrator(global_samples, n_bins=n_bins)
+
+                # Val samples for global: all leagues' val_season samples
+                global_val: list[tuple[float, bool]] = []
+                if val_season:
+                    for lid in league_ids:
+                        by_s = _fetch_samples_by_season(conn, market_key, lid, run_id=run_id)
+                        global_val.extend(by_s.get(val_season, []))
+                global_val_meta = _compute_val_metrics(result["bins"], global_val)
+
                 _id = _store_calibrator(
                     conn, result,
                     market_key=market_key,
                     entity_type=entity_type,
                     competition_type=None,
                     provider_league_id=None,
+                    **global_val_meta,
                 )
                 summaries.append({
-                    "id":                _id,
-                    "market_key":        market_key,
-                    "entity_type":       entity_type,
+                    "id":                 _id,
+                    "market_key":         market_key,
+                    "entity_type":        entity_type,
                     "provider_league_id": None,
-                    "scope":             "global",
-                    "n_train":           result["n_train"],
-                    "ece_before":        result["ece_before"],
-                    "ece_after":         result["ece_after"],
+                    "scope":              "global",
+                    "n_train":            result["n_train"],
+                    "ece_before":         result["ece_before"],
+                    "ece_after":          result["ece_after"],
+                    **global_val_meta,
                 })
                 logger.info(
-                    "calib: global %s / %s  n=%d  ECE %.4f->%.4f",
+                    "calib: global %s / %s  n=%d  ECE %.4f->%.4f%s",
                     entity_type, market_key,
                     result["n_train"], result["ece_before"], result["ece_after"],
+                    f"  val_ECE={global_val_meta['val_ece']:.4f}" if global_val_meta else "",
                 )
 
     return summaries

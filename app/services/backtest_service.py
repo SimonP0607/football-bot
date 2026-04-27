@@ -425,6 +425,7 @@ def run_backtest(
     league_id: int,
     *,
     dry_run: bool = False,
+    force: bool = False,
     only_season: int | None = None,
     train_seasons: int = 3,
     min_model_prob: float = 0.0,
@@ -432,25 +433,37 @@ def run_backtest(
     rho: float = 0.0,
     elo_season_regress: float = 0.0,
     recent_weight: float = 0.6,
+    min_seasons: int = 2,
+    min_fixtures_per_season: int = 10,
 ) -> dict:
     """Run walk-forward Poisson + Elo backtest for a league.
 
     Args:
-        league_id:          provider_league_id (API-Football).
-        dry_run:            If True, compute metrics without writing to DuckDB.
-        only_season:        Evaluate only this season as test. Elo still built
-                            from all prior available seasons.
-        train_seasons:      Number of prior seasons as training window.
-        min_model_prob:     Minimum model probability to include a pick candidate.
-        max_daily_picks:    Daily cap on selected picks.
-        rho:                Dixon-Coles correction parameter (0.0 = disabled,
-                            -0.13 = typical).
-        elo_season_regress: Seasonal Elo regression factor (0.0 = disabled,
-                            0.1 = typical). Applied between seasons.
+        league_id:               provider_league_id (API-Football).
+        dry_run:                 If True, compute metrics without writing to DuckDB.
+        force:                   If True, re-run even if a completed run with the
+                                 same name already exists. Default False prevents
+                                 duplicate training_samples on re-execution.
+        only_season:             Evaluate only this season as test. Elo still built
+                                 from all prior available seasons.
+        train_seasons:           Number of prior seasons as training window.
+        min_model_prob:          Minimum model probability to include a pick candidate.
+        max_daily_picks:         Daily cap on selected picks.
+        rho:                     Dixon-Coles correction parameter (0.0 = disabled,
+                                 -0.13 = typical).
+        elo_season_regress:      Seasonal Elo regression factor (0.0 = disabled,
+                                 0.1 = typical). Applied between seasons.
+        min_seasons:             Minimum total seasons required to run the backtest.
+                                 Leagues with fewer seasons are skipped gracefully.
+        min_fixtures_per_season: Minimum completed fixtures a test season must have
+                                 to generate training_samples. Seasons below threshold
+                                 still contribute to Elo history but produce no picks.
 
     Returns:
         Summary dict with status, metrics_by_market (with calibration and
         fair_odds_profit), metrics_by_season, selected_picks, run_id.
+        Possible statuses: 'ok', 'no_data', 'season_not_found',
+        'insufficient_seasons', 'no_test_data'.
     """
     conn = get_local_db()
 
@@ -471,16 +484,16 @@ def run_backtest(
         seasons_to_process = [s for s in all_seasons if s <= only_season]
         test_seasons_set = {only_season}
     else:
+        needed = max(min_seasons, train_seasons + 1)
+        if len(all_seasons) < needed:
+            return {
+                "status":    "insufficient_seasons",
+                "league_id": league_id,
+                "available": all_seasons,
+                "needed":    needed,
+            }
         seasons_to_process = all_seasons
         test_seasons_set = set(all_seasons[train_seasons:])
-
-    if not test_seasons_set:
-        return {
-            "status":    "insufficient_seasons",
-            "league_id": league_id,
-            "available": all_seasons,
-            "needed":    train_seasons + 1,
-        }
 
     logger.info(
         "Backtest liga=%d (%s) scope=%s neutral=%s | seasons=%s | test=%s | train_window=%d",
@@ -490,6 +503,24 @@ def run_backtest(
 
     test_list = sorted(test_seasons_set)
     run_name = f"bt_L{league_id}_T{','.join(str(s) for s in test_list)}"
+
+    # Dedup: if a completed run with the same name already exists, skip unless forced.
+    if not dry_run and not force:
+        existing_id = history_repo.get_completed_backtest_run(conn, run_name)
+        if existing_id is not None:
+            logger.info(
+                "Liga=%d: run '%s' ya completado (id=%d). Usa force=True para re-ejecutar.",
+                league_id, run_name, existing_id,
+            )
+            return {
+                "status":       "already_exists",
+                "league_id":    league_id,
+                "league_name":  league_name,
+                "run_name":     run_name,
+                "run_id":       existing_id,
+                "test_seasons": test_list,
+            }
+
     run_id: int | None = None
     if not dry_run:
         run_id = history_repo.create_backtest_run(
@@ -511,6 +542,14 @@ def run_backtest(
         if not fixtures:
             logger.debug("Liga=%d season=%d: sin fixtures completados, omitida", league_id, season)
         else:
+            # Demote test season to Elo-only if it has too few completed fixtures.
+            if is_test and len(fixtures) < min_fixtures_per_season:
+                logger.info(
+                    "  Liga=%d season=%d: solo %d fixtures (min=%d), omitida como test",
+                    league_id, season, len(fixtures), min_fixtures_per_season,
+                )
+                is_test = False
+
             team_stats:  dict = {}
             league_avgs: dict = {"avg_home": 1.3, "avg_away": 1.1}
 
@@ -658,6 +697,17 @@ def run_backtest(
 
     # ── Aggregate metrics ────────────────────────────────────────────────────
 
+    if not all_samples:
+        if not dry_run and run_id is not None:
+            history_repo.finish_backtest_run(conn, run_id, status="no_test_data")
+        return {
+            "status":    "no_test_data",
+            "league_id": league_id,
+            "league_name": league_name,
+            "entity_scope": entity_scope,
+            "test_seasons": sorted(test_seasons_set),
+        }
+
     metrics_by_market: dict[str, dict] = {}
     selected_by_market: dict[str, dict] = {}
 
@@ -700,20 +750,22 @@ def run_backtest(
         )
 
     return {
-        "status":             "ok",
-        "league_id":          league_id,
-        "league_name":        league_name,
-        "entity_scope":       entity_scope,
-        "test_seasons":       sorted(test_seasons_set),
-        "train_seasons":      train_seasons,
-        "total_samples":      len(all_samples),
-        "metrics_by_market":  metrics_by_market,
-        "metrics_by_season":  metrics_by_season,
-        "selected_picks":     selected_by_market,
-        "run_id":             run_id,
-        "dry_run":            dry_run,
-        "rho":                rho,
-        "elo_season_regress": elo_season_regress,
-        "max_daily_picks":    max_daily_picks,
-        "recent_weight":      recent_weight,
+        "status":                    "ok",
+        "league_id":                 league_id,
+        "league_name":               league_name,
+        "entity_scope":              entity_scope,
+        "test_seasons":              sorted(test_seasons_set),
+        "train_seasons":             train_seasons,
+        "total_samples":             len(all_samples),
+        "metrics_by_market":         metrics_by_market,
+        "metrics_by_season":         metrics_by_season,
+        "selected_picks":            selected_by_market,
+        "run_id":                    run_id,
+        "dry_run":                   dry_run,
+        "rho":                       rho,
+        "elo_season_regress":        elo_season_regress,
+        "max_daily_picks":           max_daily_picks,
+        "recent_weight":             recent_weight,
+        "min_seasons":               min_seasons,
+        "min_fixtures_per_season":   min_fixtures_per_season,
     }
