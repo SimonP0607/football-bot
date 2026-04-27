@@ -38,8 +38,10 @@ from dotenv import load_dotenv
 load_dotenv(_PROJECT_ROOT / ".env")
 
 MIGRATION_FILES = [
-    ("sql/migrations/001_init.sql", "Crea todas las tablas base"),
-    ("sql/migrations/002_constraints_and_indexes.sql", "Añade constraints únicos e índices"),
+    ("sql/migrations/010_production_schema.sql", "Schema completo: todas las tablas y relaciones"),
+    ("sql/migrations/011_sync_tier.sql", "Columna sync_tier en tracked_competitions"),
+    ("sql/migrations/012_settlement.sql", "Tabla pick_results (settlement / ROI)"),
+    ("sql/migrations/013_retention_cleanup.sql", "Funciones SQL de retención de datos"),
 ]
 
 _LINE = "─" * 60
@@ -116,8 +118,8 @@ def _print_migration_instructions() -> None:
     print("    5. Crea otra query y repite con el ARCHIVO 2")
     print("    6. Vuelve a ejecutar este script para confirmar")
     print()
-    print("  CONSEJO: Si ya tienes tablas de una instalación anterior,")
-    print("  los scripts usan IF NOT EXISTS y son seguros de re-ejecutar.")
+    print("  CONSEJO: 010 usa DROP … IF EXISTS antes de recrear — es para instalaciones limpias.")
+    print("  011, 012 y 013 son incrementales (IF NOT EXISTS / CREATE OR REPLACE) — siempre seguros.")
 
     for i, (rel_path, desc) in enumerate(MIGRATION_FILES, 1):
         full = _PROJECT_ROOT / rel_path

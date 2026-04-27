@@ -53,17 +53,27 @@ cp .env.example .env
 
 ## Base de datos (Supabase)
 
-En **Supabase → SQL Editor**, ejecutar en orden:
+En **Supabase → SQL Editor**, ejecutar en orden (instalación limpia):
 
 ```sql
--- Paso 1: schema principal
+-- 1. Schema completo (tablas, FKs, índices)
 sql/migrations/010_production_schema.sql
 
--- Paso 2: sync_tier (si ya tenías la 010 aplicada)
+-- 2. Columna sync_tier en tracked_competitions
 sql/migrations/011_sync_tier.sql
+
+-- 3. Tabla pick_results (settlement / ROI)
+sql/migrations/012_settlement.sql
+
+-- 4. Funciones de retención (cleanup_retention, cleanup_retention_preview)
+sql/migrations/013_retention_cleanup.sql
+
+-- 5. Seed: configurar qué ligas rastrear y con qué tier
+sql/seed_tracked_competitions.sql
 ```
 
-> Las migraciones 001–004 son históricas. Instalaciones nuevas solo necesitan 010 + 011.
+> **Nota:** 010 usa `DROP … IF EXISTS` antes de crear — aplícala solo en instalaciones limpias.
+> 011, 012 y 013 son incrementales y seguros de re-ejecutar.
 
 ---
 
@@ -85,7 +95,7 @@ y popula `ref_bookmakers` y `ref_bet_types`.
 
 ### Paso 2 — Seed: configurar qué ligas rastrear y con qué tier
 
-En **Supabase → SQL Editor**:
+En **Supabase → SQL Editor** (si no lo corriste en la instalación inicial):
 
 ```sql
 sql/seed_tracked_competitions.sql
@@ -142,6 +152,247 @@ python scripts/sync_prematch.py --window 90
 12:00  sync_today.py                 (re-sync si hubo cambios de odds)
 T-90m  sync_prematch.py --window 90  (odds frescos + lineups)
 ```
+
+---
+
+## Base histórica local (DuckDB)
+
+Capa analítica local **completamente separada** de Supabase. No afecta el flujo operativo diario.
+
+### Separación de capas
+
+| Capa | Motor | Propósito |
+|------|-------|-----------|
+| **Operativa** | Supabase | Fixtures del día, odds, picks activos (TTL corto) |
+| **Histórica** | DuckDB local | Temporadas completas, backtesting, métricas de ROI |
+
+### Tablas del schema histórico
+
+| Tabla | Contenido |
+|-------|-----------|
+| `fixtures_history` | Partidos terminados con resultado final |
+| `standings_history` | Snapshots de clasificaciones por fecha |
+| `team_stats_history` | Stats agregadas por equipo y temporada |
+| `odds_history` | Mejores cuotas al momento de generar el pick |
+| `published_picks_history` | Picks publicados en Telegram |
+| `pick_results_history` | Resultados (win/loss/void) y profit |
+| `backtest_runs` | Metadatos de cada ejecución de backtest |
+| `backtest_metrics` | Resultados por pick en cada backtest |
+
+### Inicialización (una vez)
+
+```bash
+# Crea el archivo DuckDB y aplica el schema (idempotente)
+python scripts/init_local_db.py
+
+# Verificar que todas las tablas existen y las operaciones básicas funcionan
+python scripts/test_local_db.py
+```
+
+La base se crea en `./data/local/football_history.duckdb` (configurable con `LOCAL_DB_PATH` en `.env`).
+
+### Uso desde Python
+
+```python
+from app.data.local.duckdb_client import get_local_db, init_schema
+from app.data.local import history_repo as repo
+
+conn = get_local_db()
+init_schema(conn)  # idempotente — seguro llamar siempre
+
+# Insertar un fixture histórico
+repo.insert_fixture(conn, {
+    "id": 123,                      # mirrors Supabase fixtures.id
+    "provider_fixture_id": 1060001,
+    "provider_league_id": 39,
+    "season": 2025,
+    "home_team_id": 33,
+    "away_team_id": 34,
+    "kickoff_at": "2025-04-15T20:00:00+00:00",
+    "status_short": "FT",
+    "goals_home": 2,
+    "goals_away": 1,
+})
+
+# Consultar ROI global
+summary = repo.get_roi_summary(conn)
+print(summary)  # {"wins": 10, "losses": 5, "profit_units": 4.3, "roi_pct": 28.7}
+
+# Consultar ROI por mercado
+by_market = repo.get_roi_by_market(conn)
+
+# Crear un backtest
+run_id = repo.create_backtest_run(conn, "v1_test", leagues=[39, 140], seasons=[2025])
+repo.insert_backtest_metric(conn, run_id, {...})
+repo.finish_backtest_run(conn, run_id, total_picks=50, total_profit_units=8.5, roi_pct=17.0)
+```
+
+### Consultas analíticas directas
+
+```python
+# Consulta ad-hoc con SQL
+conn = get_local_db()
+df = conn.execute("""
+    SELECT league_name, COUNT(*) AS picks, SUM(profit_units) AS profit
+    FROM pick_results_history r
+    JOIN fixtures_history f ON f.id = r.fixture_history_id
+    WHERE result_status IN ('win','loss','void')
+    GROUP BY league_name ORDER BY profit DESC
+""").df()  # retorna pandas DataFrame
+print(df)
+```
+
+### Fase 3 — Ingestión histórica desde Supabase
+
+Detecta temporadas cerradas en Supabase y las archiva en DuckDB local.
+
+#### Señal de temporada cerrada (dual, ambas deben cumplirse)
+
+| Signal | Fuente | Descripción |
+|--------|--------|-------------|
+| `competition_seasons.current = false` | Supabase | API-Football marcó la temporada como no activa |
+| Fracción terminal ≥ `HISTORY_MIN_TERMINAL_FRACTION` | `fixtures.status_short` | Al menos el 95 % de los fixtures en estado FT / AET / PEN / AWD / Canc / WO |
+
+Una liga con `current=false` pero con fixtures en curso (< 95 % terminados) **no** entra al histórico hasta que todos terminen.
+
+#### Política de ventana móvil (por liga)
+
+```
+max = HISTORY_MAX_CLOSED_SEASONS   (default: 4)
+```
+
+- Se conservan como máximo `max` temporadas cerradas por liga.
+- **Excepción primera vez**: la primera transición que superaría el límite omite el borrado (flag `first_rollover_done` en DuckDB).
+- A partir de la segunda, cada temporada nueva que entra expulsa la más antigua.
+
+El flag `first_rollover_done` se guarda en `history_metadata` (DuckDB) — no en `.env`.
+
+#### Comandos
+
+```powershell
+# Preview: muestra qué entraría al histórico sin escribir nada
+python scripts/sync_historical.py --dry-run
+
+# Archivar todas las temporadas cerradas elegibles
+python scripts/sync_historical.py
+
+# Archivar solo una liga
+python scripts/sync_historical.py --league 39
+
+# Archivar liga + temporada específica
+python scripts/sync_historical.py --league 39 --season 2024
+```
+
+#### Variables de entorno (`.env`)
+
+| Variable | Default | Descripción |
+|----------|---------|-------------|
+| `HISTORY_MAX_CLOSED_SEASONS` | `4` | Máx. temporadas cerradas por liga en DuckDB |
+| `HISTORY_SKIP_PRUNE_ON_FIRST_ROLLOVER` | `true` | Omitir borrado en la primera transición |
+| `HISTORY_MIN_TERMINAL_FRACTION` | `0.95` | Fracción mínima de fixtures terminados |
+
+#### Eventos de log
+
+| Evento | Cuándo |
+|--------|--------|
+| `[eligible_for_history]` | Liga/temporada detectada como cerrada |
+| `[inserted_history]` | Datos archivados en DuckDB |
+| `[skipped_prune_first_rollover]` | Primera excepción consumida |
+| `[pruned_oldest_history]` | Temporada más antigua eliminada |
+| `[nothing_to_archive]` | No hay temporadas cerradas elegibles |
+
+### Fase 4 — Backfill histórico desde API-Football
+
+Importa fixtures, standings y estadísticas de equipos para una temporada cerrada
+directamente desde API-Football hacia DuckDB local. No escribe en Supabase.
+
+#### Guardia de temporada actual
+
+Antes de escribir cualquier dato, el script llama a
+`/leagues?id=LEAGUE_ID&season=SEASON`. Si la API devuelve `current=True`, el
+backfill se cancela y no se escribe nada.
+
+#### Flujo de llamadas API
+
+```
+1. /leagues?id=&season=        → valida current=False, extrae coverage
+2. /fixtures?league=&season=   → todos los fixtures de la temporada (1 respuesta)
+3. /standings?league=&season=  → tabla de clasificación (si coverage.standings)
+4. /teams/statistics × N       → stats por equipo único (N ≈ 10-30 por liga)
+
+Con --with-per-fixture (opcional, caro):
+5. /fixtures/statistics × F    → estadísticas por partido (si coverage)
+6. /injuries × F               → bajas por partido (si coverage)
+7. /predictions × F            → predicciones por partido (si coverage)
+   Donde F = número de fixtures terminados.
+```
+
+#### Presupuesto de llamadas API
+
+| Modo | Llamadas por temporada | Plan free (100/día) |
+|------|----------------------|---------------------|
+| Por defecto | ~13-33 | OK para varias ligas |
+| Con `--with-per-fixture` | +3×F (F ≈ 380 PL) | ~1140 extra = 12 días |
+
+Usa `--limit-fixtures N` para acotar el costo durante pruebas.
+
+#### Comandos
+
+```powershell
+# Dry-run: muestra que se importaria sin tocar DuckDB
+python scripts/backfill_history_api.py --league 39 --season 2024 --dry-run
+
+# Backfill real de una temporada cerrada
+python scripts/backfill_history_api.py --league 39 --season 2024
+
+# Prueba rapida: solo los primeros 5 fixtures
+python scripts/backfill_history_api.py --league 39 --season 2024 --limit-fixtures 5
+
+# Con llamadas por fixture (injuries/predictions/stats)
+python scripts/backfill_history_api.py --league 39 --season 2024 --with-per-fixture --limit-fixtures 10
+```
+
+#### Idempotencia
+
+Todos los inserts usan `INSERT OR IGNORE`. Re-ejecutar el mismo comando no
+duplica registros. La constraint de unicidad por tabla:
+
+| Tabla | Constraint única |
+|-------|-----------------|
+| `fixtures_history` | `provider_fixture_id` |
+| `standings_history` | `(provider_league_id, season, team_id, snapshot_date)` |
+| `team_stats_history` | `(provider_league_id, season, team_id, snapshot_date)` |
+
+#### Mapeo de datos
+
+| Columna DuckDB | Fuente API-Football |
+|----------------|---------------------|
+| `fixtures_history.id` | `fixture.id` (provider ID, no Supabase) |
+| `fixtures_history.goals_home` | `goals.home` |
+| `standings_history.won` | `all.win` |
+| `standings_history.snapshot_date` | `season_end` del /leagues o `{season}-07-31` |
+| `team_stats_history.losses` | `fixtures.loses.total` (typo en API) |
+| `team_stats_history.raw_stats` | Respuesta completa de /teams/statistics (JSON) |
+
+#### Eventos de log
+
+| Evento | Cuándo |
+|--------|--------|
+| `[validating_league_season]` | Inicio de validación |
+| `[coverage_checked]` | Coverage leída de API |
+| `[fixtures_fetched]` | Fixtures recibidos de API |
+| `[standings_saved]` | Standings insertados en DuckDB |
+| `[stats_saved]` | Stats de equipo insertados |
+| `[skipped_no_coverage]` | Endpoint omitido por coverage=false |
+| `[skipped_current_season]` | Temporada aún activa, cancelado |
+| `[injuries_saved]` | Injuries fetched (no persistidas en esta fase) |
+| `[predictions_saved]` | Predictions fetched (no persistidas en esta fase) |
+| `[completed_backfill]` | Resumen final |
+
+### Próximas fases
+
+- **Fase 5**: Backtesting del modelo con datos históricos reales
+- **Fase 6**: Dashboard de métricas de rendimiento
 
 ---
 

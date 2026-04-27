@@ -98,6 +98,19 @@ class Settings:
         os.getenv("LOCAL_ARCHIVE_BEFORE_DELETE", "false").lower() == "true"
     )
 
+    # ── Base histórica local (DuckDB) ─────────────────────────────────────────
+    local_db_path: str = os.getenv("LOCAL_DB_PATH", "./data/local/football_history.duckdb")
+
+    # ── Política de ingestión histórica (Phase 3) ─────────────────────────────
+    # Máximo de temporadas cerradas a conservar por liga en DuckDB.
+    history_max_closed_seasons: int = _int("HISTORY_MAX_CLOSED_SEASONS", 4)
+    # Si True, la primera vez que se supere el máximo se omite el borrado.
+    history_skip_prune_on_first_rollover: bool = (
+        os.getenv("HISTORY_SKIP_PRUNE_ON_FIRST_ROLLOVER", "true").lower() == "true"
+    )
+    # Fracción mínima de fixtures en estado terminal para considerar la temporada cerrada.
+    history_min_terminal_fraction: float = _float("HISTORY_MIN_TERMINAL_FRACTION", 0.95)
+
     def __post_init__(self) -> None:
         # Strip whitespace to catch copy-paste errors (trailing newlines, spaces)
         self.api_football_key = self.api_football_key.strip()

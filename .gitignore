@@ -5,3 +5,8 @@ __pycache__/
 .pytest_cache/
 .vscode/
 .idea/
+.timezone_cache.json
+football-bot/
+data/archive/
+data/local/
+data/*.duckdb
