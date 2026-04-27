@@ -133,8 +133,24 @@ def _persist_candidates(
     run_date: str,
     fixture_id: int | None,
     provider_league_id: int,
+    provider_fixture_id: int | None = None,
+    kickoff_at: str | None = None,
+    league_name: str | None = None,
+    home_provider_team_id: int | None = None,
+    away_provider_team_id: int | None = None,
 ) -> None:
-    """Write all evaluated candidates to shadow_value_picks."""
+    """Write all evaluated candidates to shadow_value_picks.
+
+    Deduplicates by (fixture_id, run_date): deletes existing rows for the same
+    Supabase fixture on the same run_date before inserting fresh candidates.
+    This prevents duplicate picks when re-running for the same day's fixtures.
+    """
+    if fixture_id is not None:
+        conn.execute(
+            "DELETE FROM shadow_value_picks WHERE fixture_id = ? AND run_date = ?",
+            [fixture_id, run_date],
+        )
+
     for c in candidates:
         conn.execute(
             """
@@ -143,8 +159,10 @@ def _persist_candidates(
                 market_key, selection,
                 p_raw, p_cal, p_mkt, p_adj, fair_odds, offered_odds,
                 edge, ev, ev_adj, w_rel, risk_score, quality_score,
-                decision_status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                decision_status,
+                provider_fixture_id, kickoff_at, league_name,
+                home_provider_team_id, away_provider_team_id
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 run_date,
@@ -165,6 +183,11 @@ def _persist_candidates(
                 c["risk_score"],
                 c["quality_score"],
                 c.get("decision_status"),
+                provider_fixture_id,
+                kickoff_at,
+                league_name,
+                home_provider_team_id,
+                away_provider_team_id,
             ],
         )
 
@@ -183,27 +206,32 @@ def evaluate_fixture(
     fixture_id: int | None = None,
     persist: bool = True,
     odds_lookup: dict | None = None,
+    provider_fixture_id: int | None = None,
+    kickoff_at: str | None = None,
+    league_name: str | None = None,
+    home_provider_team_id: int | None = None,
+    away_provider_team_id: int | None = None,
 ) -> dict:
     """Evaluate all market picks for a fixture and select the best one.
 
     Args:
-        conn:               DuckDB connection
-        fixture_picks:      picks dict from shadow_service predict_fixture["picks"]
-                            Format: {market_key: {selection, probability, all_probs}}
-        provider_league_id: league ID (for calibrator lookup)
-        entity_type:        'club' or 'national_team'
-        competition_type:   e.g. 'domestic_league' (for future calibration scope)
-        run_date:           ISO date string (default: today)
-        fixture_id:         optional reference ID
-        persist:            write candidates to shadow_value_picks (default True)
-        odds_lookup:        Phase 5.5 — {market_key: best_offered_odds}; when set,
-                            activates p_mkt, edge, ev, ev_adj computation.
+        conn:                   DuckDB connection
+        fixture_picks:          picks dict from shadow_service predict_fixture["picks"]
+        provider_league_id:     league ID (for calibrator lookup)
+        entity_type:            'club' or 'national_team'
+        competition_type:       e.g. 'domestic_league'
+        run_date:               ISO date string (default: today)
+        fixture_id:             Supabase fixtures.id (bigserial, for traceability)
+        persist:                write candidates to shadow_value_picks (default True)
+        odds_lookup:            {market_key: best_offered_odds} — activates edge/EV
+        provider_fixture_id:    API-Football fixture ID — used for grading vs fixtures_history
+        kickoff_at:             ISO timestamp string — for display and date filtering
+        league_name:            league name string — for reporting
+        home_provider_team_id:  API-Football home team ID
+        away_provider_team_id:  API-Football away team ID
 
     Returns:
-        dict with:
-            candidates  list of all evaluated picks (one per market)
-            selected    best pick dict, or None if none pass filters
-            run_date    ISO date string used for persistence
+        dict with candidates, selected, run_date
     """
     run_date = run_date or str(date.today())
 
@@ -254,6 +282,11 @@ def evaluate_fixture(
             run_date=run_date,
             fixture_id=fixture_id,
             provider_league_id=provider_league_id,
+            provider_fixture_id=provider_fixture_id,
+            kickoff_at=kickoff_at,
+            league_name=league_name,
+            home_provider_team_id=home_provider_team_id,
+            away_provider_team_id=away_provider_team_id,
         )
 
     return {
@@ -269,32 +302,35 @@ def evaluate_fixture(
 def settle_shadow_picks(conn) -> dict:
     """Grade ungraded shadow picks against completed fixture scores.
 
-    Queries shadow_value_picks WHERE model_correct IS NULL AND fixture_id IS NOT NULL,
-    looks up goals in fixtures_history, resolves actual outcome per market,
-    and writes actual_outcome + model_correct + graded_at back.
+    Looks up provider_fixture_id (API-Football ID) in fixtures_history.id,
+    which stores the same ID. Falls back to fixture_id for legacy picks where
+    the two were equivalent.
 
-    Returns summary: {total, graded, no_score}
+    Returns summary: {total, graded, no_score, pending}
     """
     from datetime import date as _date
 
     rows = conn.execute(
         """
-        SELECT id, fixture_id, market_key, selection
+        SELECT id,
+               COALESCE(provider_fixture_id, fixture_id) AS lookup_id,
+               market_key, selection
         FROM shadow_value_picks
         WHERE model_correct IS NULL
-          AND fixture_id IS NOT NULL
+          AND (provider_fixture_id IS NOT NULL OR fixture_id IS NOT NULL)
         ORDER BY id
         """
     ).fetchall()
 
     if not rows:
-        return {"total": 0, "graded": 0, "no_score": 0}
+        return {"total": 0, "graded": 0, "no_score": 0, "pending": 0}
 
     today = str(_date.today())
     graded = 0
     no_score = 0
+    pending = 0
 
-    for pick_id, fixture_id, market_key, selection in rows:
+    for pick_id, lookup_id, market_key, selection in rows:
         score_row = conn.execute(
             """
             SELECT goals_home, goals_away
@@ -302,11 +338,18 @@ def settle_shadow_picks(conn) -> dict:
             WHERE id = ?
               AND goals_home IS NOT NULL AND goals_away IS NOT NULL
             """,
-            [fixture_id],
+            [lookup_id],
         ).fetchone()
 
         if score_row is None:
-            no_score += 1
+            # Check whether this fixture even exists in history (pending vs truly missing)
+            exists = conn.execute(
+                "SELECT 1 FROM fixtures_history WHERE id = ? LIMIT 1", [lookup_id]
+            ).fetchone()
+            if exists:
+                pending += 1  # fixture exists but no score yet (match in progress or future)
+            else:
+                no_score += 1  # fixture not in local history at all
             continue
 
         goals_home, goals_away = score_row
@@ -341,8 +384,11 @@ def settle_shadow_picks(conn) -> dict:
         )
         graded += 1
 
-    logger.info("settle_shadow_picks: %d gradados de %d (%d sin score)", graded, len(rows), no_score)
-    return {"total": len(rows), "graded": graded, "no_score": no_score}
+    logger.info(
+        "settle_shadow_picks: %d gradados de %d (%d pendientes, %d sin historia)",
+        graded, len(rows), pending, no_score,
+    )
+    return {"total": len(rows), "graded": graded, "no_score": no_score, "pending": pending}
 
 
 def shadow_picks_grade_summary(conn) -> list[dict]:

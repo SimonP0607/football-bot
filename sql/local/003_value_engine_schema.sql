@@ -107,3 +107,14 @@ ALTER TABLE calibration_registry ADD COLUMN IF NOT EXISTS val_logloss DOUBLE;
 ALTER TABLE shadow_value_picks ADD COLUMN IF NOT EXISTS actual_outcome VARCHAR;
 ALTER TABLE shadow_value_picks ADD COLUMN IF NOT EXISTS model_correct  BOOLEAN;
 ALTER TABLE shadow_value_picks ADD COLUMN IF NOT EXISTS graded_at      VARCHAR;
+
+-- ── Fase F: live shadow columns ────────────────────────────────────────────────
+-- Populated when shadow picks come from real Supabase fixtures (run_shadow_today.py).
+-- provider_fixture_id: API-Football fixture ID — used to join fixtures_history for grading.
+-- fixture_id stays as Supabase internal bigserial (for traceability).
+
+ALTER TABLE shadow_value_picks ADD COLUMN IF NOT EXISTS provider_fixture_id   BIGINT;
+ALTER TABLE shadow_value_picks ADD COLUMN IF NOT EXISTS kickoff_at             VARCHAR;
+ALTER TABLE shadow_value_picks ADD COLUMN IF NOT EXISTS league_name            VARCHAR;
+ALTER TABLE shadow_value_picks ADD COLUMN IF NOT EXISTS home_provider_team_id  BIGINT;
+ALTER TABLE shadow_value_picks ADD COLUMN IF NOT EXISTS away_provider_team_id  BIGINT;
