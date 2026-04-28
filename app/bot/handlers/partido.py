@@ -14,6 +14,7 @@ from telegram.ext import ContextTypes
 from app.bot.middleware.auth import require_auth
 from app.bot.middleware.db_guard import ensure_db_ready
 from app.bot.formatters.pick_formatter import format_partido
+from app.bot.utils import send_html
 from app.data.repositories.fixture_repo import (
     get_fixture_by_provider_id,
     get_fixture_by_internal_id,
@@ -93,7 +94,7 @@ async def partido_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         )
         return
 
-    await update.message.reply_text(text, parse_mode="HTML")
+    await send_html(update.message, text)
 
 
 def _resolve_fixture(query: str) -> dict | list | None:

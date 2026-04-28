@@ -11,6 +11,7 @@ from telegram.ext import ContextTypes
 
 from app.bot.middleware.auth import require_auth
 from app.bot.formatters.pick_formatter import format_estado
+from app.bot.utils import send_html
 from app.data.db_health import check_schema
 
 logger = logging.getLogger(__name__)
@@ -50,4 +51,4 @@ async def estado_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         logger.debug("/estado: no se pudo leer rate_state — %s", exc)
 
     text = format_estado(schema, counts, rate_state=rate_state, last_sync=last_sync)
-    await update.message.reply_text(text, parse_mode="HTML")
+    await send_html(update.message, text)

@@ -12,6 +12,7 @@ from app.bot.handlers.id import id_handler
 from app.bot.handlers.debug_config import debug_config_handler
 from app.bot.handlers.partido import partido_handler
 from app.bot.handlers.ligas import ligas_handler
+from app.bot.handlers.valor import valor_handler
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,7 @@ _BOT_COMMANDS = [
     BotCommand("top", "Top picks por confianza"),
     BotCommand("partido", "Análisis de un partido concreto"),
     BotCommand("ligas", "Ligas activas y su cobertura"),
+    BotCommand("valor", "Métricas del value engine (último sync)"),
     BotCommand("estado", "Estado del sistema (Telegram, DB, API, datos)"),
     BotCommand("id", "Ver tu Telegram user ID (setup inicial)"),
 ]
@@ -105,6 +107,7 @@ def build_app() -> Application:
     application.add_handler(CommandHandler("top", top_handler))
     application.add_handler(CommandHandler("partido", partido_handler))
     application.add_handler(CommandHandler("ligas", ligas_handler))
+    application.add_handler(CommandHandler("valor", valor_handler))
     application.add_handler(CommandHandler("estado", estado_handler))
     application.add_handler(CommandHandler("id", id_handler))
 

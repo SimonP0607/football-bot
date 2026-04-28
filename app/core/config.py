@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 # Resolve .env relative to this file's location so it works regardless of the
 # working directory from which the process was launched.
 _ENV_FILE = Path(__file__).resolve().parent.parent.parent / ".env"
-load_dotenv(_ENV_FILE)
+load_dotenv(_ENV_FILE, override=True)
 
 
 def _int(key: str, default: int) -> int:
@@ -100,6 +100,29 @@ class Settings:
 
     # ── Base histórica local (DuckDB) ─────────────────────────────────────────
     local_db_path: str = os.getenv("LOCAL_DB_PATH", "./data/local/football_history.duckdb")
+
+    # ── Value Engine — integración controlada offline→producción ──────────────
+    # Modo de operación:
+    #   off    — comportamiento actual intacto, no usa DuckDB
+    #   shadow — calcula métricas pero no cambia decisiones
+    #   assist — filtra y reordena candidatos por value score
+    value_engine_mode: str = os.getenv("VALUE_ENGINE_MODE", "off").strip()
+    value_engine_enabled: bool = (
+        os.getenv("VALUE_ENGINE_ENABLED", "false").strip().lower() == "true"
+    )
+    value_engine_local_db_path: str = os.getenv(
+        "VALUE_ENGINE_LOCAL_DB_PATH", "./data/local/football_history.duckdb"
+    ).strip()
+    value_engine_min_quality: float = _float("VALUE_ENGINE_MIN_QUALITY", 0.55)
+    value_engine_min_edge: float = _float("VALUE_ENGINE_MIN_EDGE", 0.03)
+    value_engine_min_ev_adj: float = _float("VALUE_ENGINE_MIN_EV_ADJ", 0.01)
+    value_engine_require_odds: bool = (
+        os.getenv("VALUE_ENGINE_REQUIRE_ODDS", "true").strip().lower() == "true"
+    )
+    value_engine_max_picks_per_league: int = _int("VALUE_ENGINE_MAX_PICKS_PER_LEAGUE", 3)
+    value_engine_fallback_to_current: bool = (
+        os.getenv("VALUE_ENGINE_FALLBACK_TO_CURRENT", "true").strip().lower() == "true"
+    )
 
     # ── Política de ingestión histórica (Phase 3) ─────────────────────────────
     # Máximo de temporadas cerradas a conservar por liga en DuckDB.

@@ -120,6 +120,59 @@ class PredictionService:
             total_candidates, fixtures_with_odds,
         )
 
+        # Capture the full candidate list BEFORE the VE hook may narrow it.
+        # Phase 3 must persist ALL candidates so that stale is_publishable=True
+        # rows from previous syncs are always overwritten.
+        all_candidates_for_persist = list(all_enriched)
+
+        # ── Optional: Value Engine hook ────────────────────────────────────────
+        # Controlled by VALUE_ENGINE_ENABLED + VALUE_ENGINE_MODE (default: off).
+        # mode=shadow: enriches with metrics, does NOT change selection/ranking.
+        # mode=assist: filters + reorders by value score; fallback to current if needed.
+        # Any error here is caught and logged; the current pipeline continues unchanged.
+        value_results: dict[tuple, dict] = {}
+        ve_after_cap = 0   # VE-selected count after per-league cap (assist mode only)
+        if settings.value_engine_enabled and settings.value_engine_mode in ("shadow", "assist"):
+            from app.services.value_engine_live_adapter import value_engine_adapter
+            try:
+                fixture_map = {f["id"]: f for f in prematch_fixtures}
+                value_results = value_engine_adapter.enrich_pick_candidates_with_value(
+                    all_enriched, fixture_map
+                )
+                if settings.value_engine_mode == "shadow":
+                    value_engine_adapter.log_shadow_comparison(all_enriched, value_results)
+
+                elif settings.value_engine_mode == "assist":
+                    value_filtered = value_engine_adapter.rank_candidates_with_value(
+                        all_enriched, value_results
+                    )
+                    ve_after_cap = len(value_filtered)
+                    if value_filtered:
+                        logger.info(
+                            "ValueEngine assist: %d evaluados → %d value_selected (post-cap), "
+                            "pasando al PickFilter",
+                            len(all_enriched), ve_after_cap,
+                        )
+                        all_enriched = value_filtered
+                    elif settings.value_engine_fallback_to_current:
+                        logger.warning(
+                            "ValueEngine assist: 0 value_selected — "
+                            "fallback al modelo actual (%d candidatos)",
+                            total_candidates,
+                        )
+                    else:
+                        logger.warning(
+                            "ValueEngine assist: 0 value_selected y "
+                            "VALUE_ENGINE_FALLBACK_TO_CURRENT=false — picks=0"
+                        )
+                        all_enriched = []
+            except Exception as _ve_exc:
+                logger.error(
+                    "ValueEngine: error inesperado (ignorado, flujo actual continua): %s",
+                    _ve_exc,
+                )
+        # ── End Value Engine hook ──────────────────────────────────────────────
+
         # Phase 2: apply global filter + hard cap ONCE across all candidates
         publishable = self._filter.apply(
             all_enriched,
@@ -129,12 +182,14 @@ class PredictionService:
         )
         publishable_set = {(p.fixture_id, p.market, p.selection) for p in publishable}
         logger.info(
-            "Cap global: %d picks oficiales de %d candidatos (cap=%d)",
-            len(publishable), total_candidates, settings.max_daily_picks,
+            "Cap global: %d picks oficiales de %d candidatos al PickFilter (cap=%d)",
+            len(publishable), len(all_enriched), settings.max_daily_picks,
         )
 
-        # Phase 3: persist ALL candidates — only the top-cap set gets is_publishable=True
-        for candidate in all_enriched:
+        # Phase 3: persist ALL evaluated candidates (all_candidates_for_persist, not
+        # the VE-filtered subset). This guarantees stale is_publishable=True rows from
+        # previous syncs are overwritten, preventing ghost picks in /estado.
+        for candidate in all_candidates_for_persist:
             is_pub = (candidate.fixture_id, candidate.market, candidate.selection) in publishable_set
             prediction_repo.save_prediction(
                 fixture_id=candidate.fixture_id,
@@ -147,6 +202,20 @@ class PredictionService:
                 argument_json=candidate.argument_json,
                 is_publishable=is_pub,
             )
+            # Persist value engine metrics when available (no-op when mode=off)
+            if value_results:
+                _key = (candidate.fixture_id, candidate.market, candidate.selection)
+                _vr  = value_results.get(_key)
+                if _vr:
+                    try:
+                        prediction_repo.update_value_metrics(
+                            candidate.fixture_id, candidate.market, candidate.selection, _vr
+                        )
+                    except Exception as _ve_exc:
+                        logger.debug(
+                            "VE metricas: fixture=%s %s/%s: %s",
+                            candidate.fixture_id, candidate.market, candidate.selection, _ve_exc,
+                        )
 
         # Phase 4: create pending settlement for official picks (idempotent)
         # Import here to avoid circular import at module level.
@@ -171,6 +240,13 @@ class PredictionService:
                     settlement_existing += 1
 
         total_picks = len(publishable)
+        ve_selected = sum(
+            1 for v in value_results.values()
+            if v.get("value_engine_status") == "value_selected"
+        ) if value_results else 0
+        # Candidates that passed VE (after league cap) but were rejected by PickFilter.
+        # Positive value means the VE and the consensus model disagree on these picks.
+        ve_pickfilter_rejected = (ve_after_cap - total_picks) if ve_after_cap > 0 else 0
         summary = {
             "fixtures_fetched": len(all_fixtures),
             "discarded_started": discarded_started,
@@ -179,13 +255,19 @@ class PredictionService:
             "publishable_saved": total_picks,
             "settlement_created": settlement_created,
             "settlement_existing": settlement_existing,
+            "value_engine_mode": settings.value_engine_mode if settings.value_engine_enabled else "off",
+            "value_engine_evaluated": len(value_results),
+            "value_engine_selected": ve_selected,
+            "value_engine_after_cap": ve_after_cap,
+            "value_engine_pickfilter_rejected": ve_pickfilter_rejected,
         }
         logger.info(
             "=== RESUMEN DEL DÍA === fixtures=%d prematch=%d sin_cuotas=%d "
-            "candidatos=%d | picks_oficiales=%d (cap=%d) | "
-            "settlement_nuevo=%d ya_existia=%d",
+            "candidatos=%d | ve_eval=%d ve_sel=%d ve_pickfilter_rejected=%d | "
+            "picks_oficiales=%d (cap=%d) | settlement_nuevo=%d ya_existia=%d",
             summary["fixtures_fetched"], len(prematch_fixtures),
             discarded_no_odds, total_candidates,
+            len(value_results), ve_selected, ve_pickfilter_rejected,
             total_picks, settings.max_daily_picks,
             settlement_created, settlement_existing,
         )

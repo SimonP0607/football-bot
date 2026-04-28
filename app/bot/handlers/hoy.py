@@ -7,6 +7,7 @@ from telegram.ext import ContextTypes
 from app.bot.middleware.auth import require_auth
 from app.bot.middleware.db_guard import ensure_db_ready
 from app.bot.formatters.pick_formatter import format_picks
+from app.bot.utils import send_html
 from app.data.repositories.fixture_repo import get_teams_by_ids, get_leagues_by_ids
 from app.services.prediction_service import prediction_service
 
@@ -42,4 +43,4 @@ async def hoy_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             "Usa /estado para ver el estado del sistema y revisa los logs."
         )
 
-    await update.message.reply_text(text, parse_mode="HTML")
+    await send_html(update.message, text)
