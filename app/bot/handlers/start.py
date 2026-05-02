@@ -5,6 +5,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from app.bot.middleware.auth import require_auth
+from app.bot.ui.keyboard import main_menu_keyboard
 
 logger = logging.getLogger(__name__)
 
@@ -20,16 +21,22 @@ Pronósticos basados en modelo estadístico Poisson + Elo + Value Engine calibra
 /partido &lt;id o equipo&gt; — análisis completo de un partido concreto
 /ligas — ligas activas por tier (paginado: /ligas 1 · /ligas 2 · /ligas 3)
 /valor — métricas del Value Engine del último sync
+/resultados — últimos picks resueltos (win/loss/void + profit)
+/rendimiento — ROI, hit rate y yield por período y mercado
 /estado — salud del sistema: Supabase, API-Football, último sync
+/live — picks en juego ahora mismo (estado live)
+/seguimiento &lt;id&gt; — seguimiento detallado de un partido
+/parlay — parlays recomendados del día (combinadas)
+/equipo &lt;nombre o id&gt; — buscar equipo en el catálogo
+/jugador &lt;nombre&gt; — buscar jugador en el catálogo
+/alertas — alertas proactivas y estado del scheduler
+/menu — menú con botones interactivos
+/ayuda — ayuda completa y guía de uso
 
-<b>Flujo recomendado</b>
+<b>Modo conversacional</b>
 
-1. Sincroniza datos del día:
-   <code>python scripts/sync_today.py</code>
-2. Verifica el sistema: /estado
-3. Consulta picks: /top · /hoy
-4. Analiza un partido: /partido &lt;equipo o ID&gt;
-5. Revisa value engine: /valor
+También puedes escribirme en lenguaje natural:
+<i>"Dame picks de hoy" · "Combinada conservadora" · "Estado del sistema"</i>
 
 <b>Notas</b>
 
@@ -43,4 +50,7 @@ Pronósticos basados en modelo estadístico Poisson + Elo + Value Engine calibra
 @require_auth
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.info("Comando /start desde user_id=%s", update.effective_user.id)
-    await update.message.reply_text(_WELCOME, parse_mode="HTML")
+    await update.message.reply_html(
+        _WELCOME,
+        reply_markup=main_menu_keyboard(),
+    )

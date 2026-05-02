@@ -86,7 +86,46 @@ async def partido_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         team_names = get_teams_by_ids(team_ids)
         league_names = get_leagues_by_ids(league_ids)
 
-        text = format_partido(fixture, candidates, team_names, league_names)
+        # Phase 4: load availability from DuckDB (best-effort, never blocks)
+        availability = None
+        prematch     = None
+        provider_fid = fixture.get("provider_fixture_id")
+        try:
+            from app.data.local.duckdb_client import get_local_db
+            from app.data.local.availability_repo import get_availability_for_fixture
+            _dconn = get_local_db()
+            if provider_fid:
+                availability = get_availability_for_fixture(_dconn, provider_fid)
+        except Exception as _avail_exc:
+            logger.debug("/partido: availability lookup failed — %s", _avail_exc)
+
+        # Phase 6: load prematch intelligence from DuckDB (best-effort)
+        try:
+            from app.data.local.duckdb_client import get_local_db
+            from app.data.local.prematch_repo import get_prematch_summary_for_fixture
+            _dconn = get_local_db()
+            if provider_fid:
+                prematch = get_prematch_summary_for_fixture(_dconn, provider_fid)
+        except Exception as _pm_exc:
+            logger.debug("/partido: prematch lookup failed — %s", _pm_exc)
+
+        # Phase 7: load live state from DuckDB (best-effort)
+        live_state = None
+        try:
+            from app.data.local.duckdb_client import get_local_db
+            from app.services.live_monitor_service import get_fixture_live_state
+            _dconn = get_local_db()
+            if provider_fid:
+                live_state = get_fixture_live_state(_dconn, provider_fid)
+        except Exception as _live_exc:
+            logger.debug("/partido: live state lookup failed — %s", _live_exc)
+
+        text = format_partido(
+            fixture, candidates, team_names, league_names,
+            availability=availability,
+            prematch=prematch,
+            live_state=live_state,
+        )
     except Exception as exc:
         logger.error("/partido: error analizando fixture_id=%s — %s", fixture["id"], exc, exc_info=True)
         await update.message.reply_text(

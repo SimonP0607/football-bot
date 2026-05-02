@@ -375,20 +375,38 @@ def get_leagues_by_ids(league_ids: set[int]) -> dict[int, str]:
 
 
 def upsert_team(
-    provider_team_id: int, name: str, country: str | None
+    provider_team_id: int,
+    name: str,
+    country: str | None,
+    *,
+    is_national: bool = False,
+    code: str | None = None,
+    founded: int | None = None,
+    logo_url: str | None = None,
 ) -> dict:
-    """Insert or update a team. Returns the stored row."""
+    """Insert or update a team. Returns the stored row.
+
+    The extra fields (is_national, code, founded, logo_url) are populated when
+    the entity catalog has run fetch_teams(). The daily sync (sync_today.py)
+    only provides provider_team_id, name, and country, so the extra fields
+    default to False/None and are left alone on subsequent upserts.
+    """
     client = get_supabase()
+    payload: dict = {
+        "provider_team_id": provider_team_id,
+        "name": name,
+        "country": country,
+        "is_national": is_national,
+    }
+    if code is not None:
+        payload["code"] = code
+    if founded is not None:
+        payload["founded"] = founded
+    if logo_url is not None:
+        payload["logo_url"] = logo_url
     result = (
         client.table("teams")
-        .upsert(
-            {
-                "provider_team_id": provider_team_id,
-                "name": name,
-                "country": country,
-            },
-            on_conflict="provider_team_id",
-        )
+        .upsert(payload, on_conflict="provider_team_id")
         .execute()
     )
     row = result.data[0] if result.data else {}

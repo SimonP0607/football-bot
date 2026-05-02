@@ -68,8 +68,29 @@ def _parse_explicit_leagues(leagues_arg: str) -> dict[int, int]:
     return mapping
 
 
+def _register_budget_hook() -> None:
+    try:
+        from app.data.api_football.client import register_call_hook
+        from app.services.api_budget_service import record_call
+
+        def _hook(endpoint: str, duration_ms: int, status_code: int, results: int) -> None:
+            record_call(
+                endpoint=endpoint,
+                duration_ms=duration_ms,
+                status_code=status_code,
+                results_count=results,
+                source_script="sync_today",
+                priority="high",
+            )
+
+        register_call_hook(_hook)
+    except Exception:
+        pass
+
+
 async def main(league_seasons: dict[int, int] | None, timezone: str | None) -> None:
     logger = logging.getLogger(__name__)
+    _register_budget_hook()
 
     if league_seasons:
         logger.info(

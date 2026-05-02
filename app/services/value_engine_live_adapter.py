@@ -41,24 +41,40 @@ STATUS_MISSING_HISTORY       = "value_rejected_missing_history"
 STATUS_MISSING_CALIBRATOR    = "value_rejected_missing_calibrator"
 STATUS_OFF                   = "value_skipped_engine_off"
 STATUS_ERROR                 = "value_error_fallback"
+STATUS_REJECTED_AVAILABILITY = "value_rejected_high_availability_risk"
+STATUS_REJECTED_PREMATCH     = "value_rejected_high_prematch_drift"
+
+# Impact levels ordered by severity (used for max() comparisons)
+_IMPACT_ORDER = {"none": 0, "low": 1, "medium": 2, "high": 3, "unknown": -1}
+_STRENGTH_ORDER = {"none": 0, "low": 1, "medium": 2, "high": 3}
 
 _EMPTY: dict = {
-    "value_engine_status":    STATUS_OFF,
-    "p_raw":                  None,
-    "p_cal":                  None,
-    "fair_odds":              None,
-    "p_mkt":                  None,
-    "edge":                   None,
-    "ev":                     None,
-    "ev_adj":                 None,
-    "w_rel":                  None,
-    "quality_score":          None,
-    "rejection_reason":       None,
-    "model_scope":            None,
-    "calibrator_scope":       None,
-    "historical_sample_size": None,
-    "value_rank_score":       None,
-    "provider_league_id":     None,
+    "value_engine_status":          STATUS_OFF,
+    "p_raw":                        None,
+    "p_cal":                        None,
+    "fair_odds":                    None,
+    "p_mkt":                        None,
+    "edge":                         None,
+    "ev":                           None,
+    "ev_adj":                       None,
+    "w_rel":                        None,
+    "quality_score":                None,
+    "rejection_reason":             None,
+    "model_scope":                  None,
+    "calibrator_scope":             None,
+    "historical_sample_size":       None,
+    "value_rank_score":             None,
+    # Phase 5: availability enrichment (None = not evaluated)
+    "quality_before_availability":  None,
+    "availability_penalty":         None,
+    "availability_boost":           None,
+    "availability_coverage":        None,
+    "availability_modeled_impact":  None,
+    "availability_opponent_impact": None,
+    "availability_warning":         None,
+    # Phase 6
+    "prematch_signal":              None,
+    "provider_league_id":           None,
 }
 
 
@@ -94,6 +110,7 @@ class ValueEngineLiveAdapter:
         self._conn_failed = False  # True once we know DuckDB is unavailable
         self._cs_map: dict | None = None      # {cs_id: {provider_league_id, league_name}}
         self._team_map: dict[int, dict] = {}  # {team_id: {provider_team_id, name}}
+        self._avail_cache: dict[int, dict | None] = {}  # {provider_fixture_id: avail_data|None}
         self._bypass_mode_check = False       # set True by test scripts to skip settings check
 
     # ── Public checks ─────────────────────────────────────────────────────────
@@ -112,9 +129,10 @@ class ValueEngineLiveAdapter:
         return self.is_mode_active() and self._get_conn() is not None
 
     def reset_caches(self) -> None:
-        """Clear per-run Supabase mapping caches (call between daily runs if needed)."""
+        """Clear per-run caches (call between daily runs if needed)."""
         self._cs_map = None
         self._team_map = {}
+        self._avail_cache = {}
 
     # ── DuckDB connection ─────────────────────────────────────────────────────
 
@@ -166,6 +184,349 @@ class ValueEngineLiveAdapter:
             self._team_map.update(new_entries)
         except Exception as exc:
             logger.warning("ValueEngine: error cargando team_map desde Supabase: %s", exc)
+
+    # ── Phase 6: Prematch enrichment ─────────────────────────────────────────
+
+    def _load_prematch_meta(
+        self,
+        conn,
+        provider_fixture_id: int,
+        market: str,
+        selection: str,
+    ) -> dict:
+        """Read prematch odds movement and alerts for a (fixture, market, selection).
+
+        Returns a flat dict with: movement_direction, movement_strength,
+        implied_delta, odds_delta, alerts (list of high/medium severity titles).
+        Returns empty dict if no prematch data exists.
+        """
+        try:
+            from app.data.local.prematch_repo import (
+                get_odds_movement_by_provider_fixture,
+                get_alerts_for_fixture,
+            )
+            all_mv = get_odds_movement_by_provider_fixture(conn, provider_fixture_id)
+            mv = next(
+                (
+                    r for r in all_mv
+                    if r["market_key"] == market and r["selection"] == selection
+                ),
+                None,
+            )
+            alerts = [
+                a["title"] for a in get_alerts_for_fixture(conn, provider_fixture_id)
+                if a.get("severity") in ("high", "medium")
+                and a.get("related_market") == market
+            ]
+            if mv is None:
+                return {"alerts": alerts} if alerts else {}
+            return {
+                "movement_direction": mv.get("movement_direction", "stable"),
+                "movement_strength":  mv.get("movement_strength", "none"),
+                "implied_delta":      mv.get("implied_delta", 0.0),
+                "odds_delta":         mv.get("odds_delta", 0.0),
+                "alerts":             alerts,
+            }
+        except Exception as exc:
+            logger.debug("VE: _load_prematch_meta fid=%s failed: %s", provider_fixture_id, exc)
+            return {}
+
+    def _compute_prematch_adjustment(
+        self,
+        prematch_meta: dict,
+        quality_before: float,
+    ) -> dict:
+        """Compute penalty/boost from prematch odds signal.
+
+        Returns: {penalty, boost, quality_after, warning}
+        """
+        if not prematch_meta:
+            return {"penalty": 0.0, "boost": 0.0, "quality_after": quality_before, "warning": None}
+
+        direction = prematch_meta.get("movement_direction", "stable")
+        strength  = prematch_meta.get("movement_strength", "none")
+        s_order   = _STRENGTH_ORDER.get(strength, 0)
+        cfg       = settings
+
+        penalty = 0.0
+        boost   = 0.0
+        warning = None
+
+        if direction == "drifting":
+            if s_order >= 3:   # high
+                penalty = cfg.prematch_penalty_high_drift
+                warning = f"prematch_drift_high"
+            elif s_order >= 2: # medium
+                penalty = cfg.prematch_penalty_medium_drift
+                warning = f"prematch_drift_medium"
+        elif direction == "shortening" and s_order >= 1:
+            boost = cfg.prematch_boost_supporting_move
+
+        net = max(0.0, penalty - boost)
+        quality_after = round(max(0.0, min(1.0, quality_before - net)), 4)
+
+        return {
+            "penalty":       round(penalty, 4),
+            "boost":         round(boost, 4),
+            "quality_after": quality_after,
+            "warning":       warning,
+        }
+
+    def _enrich_with_prematch(
+        self,
+        result: dict,
+        conn,
+        fix: dict,
+        candidate: "PredictionCandidate",
+    ) -> None:
+        """Mutate result in-place with prematch signal fields. Never raises."""
+        if not settings.prematch_intelligence_enabled:
+            return
+
+        provider_fixture_id = fix.get("provider_fixture_id")
+        if not provider_fixture_id:
+            return
+
+        try:
+            prematch_meta = self._load_prematch_meta(
+                conn, provider_fixture_id, candidate.market, candidate.selection
+            )
+            if not prematch_meta:
+                result["prematch_signal"] = None
+                return
+
+            quality_before = result.get("quality_score") or 0.0
+            adj = self._compute_prematch_adjustment(prematch_meta, quality_before)
+
+            result["prematch_signal"] = {
+                "movement_direction": prematch_meta.get("movement_direction"),
+                "movement_strength":  prematch_meta.get("movement_strength"),
+                "implied_delta":      prematch_meta.get("implied_delta"),
+                "prematch_penalty":   adj["penalty"],
+                "prematch_boost":     adj["boost"],
+                "alerts":             prematch_meta.get("alerts", []),
+                "warning":            adj["warning"],
+            }
+
+            if adj["penalty"] > 0 or adj["boost"] > 0:
+                result["quality_score"] = adj["quality_after"]
+
+            if (
+                settings.prematch_reject_high_risk
+                and prematch_meta.get("movement_direction") == "drifting"
+                and prematch_meta.get("movement_strength") == "high"
+                and adj["quality_after"] < settings.value_engine_min_quality
+                and result.get("value_engine_status") == STATUS_SELECTED
+            ):
+                result["value_engine_status"] = STATUS_REJECTED_PREMATCH
+                result["rejection_reason"] = (
+                    f"prematch_high_drift: quality_after={adj['quality_after']:.3f}"
+                )
+
+        except Exception as exc:
+            logger.debug(
+                "VE: _enrich_with_prematch fid=%s failed: %s", fix.get("id"), exc
+            )
+
+    # ── Phase 5: Availability integration ────────────────────────────────────
+
+    def _load_fixture_availability(
+        self,
+        conn,
+        provider_fixture_id: int,
+        home_provider_id: int | None,
+        away_provider_id: int | None,
+    ) -> dict | None:
+        """Load and cache DuckDB availability data for a fixture."""
+        if provider_fixture_id in self._avail_cache:
+            return self._avail_cache[provider_fixture_id]
+        try:
+            from app.data.local.availability_repo import get_availability_for_fixture
+            data = get_availability_for_fixture(conn, provider_fixture_id)
+            self._avail_cache[provider_fixture_id] = data
+            return data
+        except Exception as exc:
+            logger.debug(
+                "ValueEngine: availability lookup prov_fid=%s failed: %s",
+                provider_fixture_id, exc,
+            )
+            self._avail_cache[provider_fixture_id] = None
+            return None
+
+    def _get_candidate_availability_context(
+        self,
+        avail_data: dict | None,
+        market: str,
+        selection: str,
+        home_provider_id: int | None,
+        away_provider_id: int | None,
+    ) -> dict:
+        """Determine modeled/opponent impact and coverage for a (market, selection) pair.
+
+        Returns:
+            {coverage, modeled_impact, opponent_impact, direction}
+        """
+        unknown = {
+            "coverage": "unknown",
+            "modeled_impact": "unknown",
+            "opponent_impact": "unknown",
+            "direction": "none",
+        }
+        if not avail_data:
+            return unknown
+
+        summaries = avail_data.get("summaries", {})
+        if not summaries:
+            return unknown
+
+        any_summary = next(iter(summaries.values()), {})
+        coverage = any_summary.get("coverage_status", "unknown")
+
+        if market == "1X2":
+            if selection == "Home":
+                direction = "home"
+            elif selection == "Away":
+                direction = "away"
+            else:
+                direction = "none"
+        else:
+            direction = "both"
+
+        home_summary = summaries.get(home_provider_id, {}) if home_provider_id else {}
+        away_summary = summaries.get(away_provider_id, {}) if away_provider_id else {}
+        home_impact  = home_summary.get("impact_label", "unknown")
+        away_impact  = away_summary.get("impact_label", "unknown")
+
+        if direction == "home":
+            modeled_impact  = home_impact
+            opponent_impact = away_impact
+        elif direction == "away":
+            modeled_impact  = away_impact
+            opponent_impact = home_impact
+        elif direction == "both":
+            ord_h = _IMPACT_ORDER.get(home_impact, -1)
+            ord_a = _IMPACT_ORDER.get(away_impact, -1)
+            modeled_impact  = home_impact if ord_h >= ord_a else away_impact
+            opponent_impact = "none"
+        else:
+            modeled_impact  = "none"
+            opponent_impact = "none"
+
+        return {
+            "coverage":        coverage,
+            "modeled_impact":  modeled_impact,
+            "opponent_impact": opponent_impact,
+            "direction":       direction,
+        }
+
+    def _compute_availability_adjustment(
+        self,
+        avail_ctx: dict,
+        quality_before: float,
+    ) -> dict:
+        """Compute penalty/boost and adjusted quality_score.
+
+        Returns:
+            {penalty, boost, quality_after, warning}
+        """
+        coverage       = avail_ctx.get("coverage", "unknown")
+        modeled_impact = avail_ctx.get("modeled_impact", "unknown")
+        opponent_impact= avail_ctx.get("opponent_impact", "unknown")
+
+        if coverage != "data":
+            return {"penalty": 0.0, "boost": 0.0, "quality_after": quality_before, "warning": None}
+
+        cfg = settings
+
+        if modeled_impact == "high":
+            penalty = cfg.value_engine_availability_high_penalty
+        elif modeled_impact == "medium":
+            penalty = cfg.value_engine_availability_medium_penalty
+        elif modeled_impact == "low":
+            penalty = cfg.value_engine_availability_low_penalty
+        else:
+            penalty = 0.0
+
+        if opponent_impact == "high":
+            boost = cfg.value_engine_availability_opponent_high_boost
+        elif opponent_impact == "medium":
+            boost = cfg.value_engine_availability_opponent_medium_boost
+        else:
+            boost = 0.0
+
+        net = min(max(0.0, penalty - boost), cfg.value_engine_availability_max_penalty)
+        quality_after = round(max(0.0, min(1.0, quality_before - net)), 4)
+
+        warning = None
+        if modeled_impact in ("high", "medium") and net > 0.0:
+            warning = f"availability_{modeled_impact}_net={net:.3f}"
+
+        return {
+            "penalty":       round(penalty, 4),
+            "boost":         round(boost, 4),
+            "quality_after": quality_after,
+            "warning":       warning,
+        }
+
+    def _enrich_with_availability(
+        self,
+        result: dict,
+        conn,
+        fix: dict,
+        info: dict,
+        candidate: "PredictionCandidate",
+    ) -> None:
+        """Mutate result in-place with availability penalty/boost fields.
+
+        Never raises. If data is unavailable all availability fields stay None.
+        """
+        if not settings.value_engine_use_availability:
+            return
+
+        provider_fixture_id = fix.get("provider_fixture_id")
+        if not provider_fixture_id:
+            return
+
+        home_pid = info.get("provider_home_team_id")
+        away_pid = info.get("provider_away_team_id")
+
+        try:
+            avail_data = self._load_fixture_availability(
+                conn, provider_fixture_id, home_pid, away_pid
+            )
+            avail_ctx = self._get_candidate_availability_context(
+                avail_data, candidate.market, candidate.selection, home_pid, away_pid
+            )
+
+            quality_before = result.get("quality_score") or 0.0
+            adj = self._compute_availability_adjustment(avail_ctx, quality_before)
+
+            result["quality_before_availability"]  = quality_before
+            result["availability_penalty"]         = adj["penalty"]
+            result["availability_boost"]           = adj["boost"]
+            result["availability_coverage"]        = avail_ctx["coverage"]
+            result["availability_modeled_impact"]  = avail_ctx["modeled_impact"]
+            result["availability_opponent_impact"] = avail_ctx["opponent_impact"]
+            result["availability_warning"]         = adj["warning"]
+            result["quality_score"]                = adj["quality_after"]
+
+            if (
+                settings.value_engine_reject_high_availability_risk
+                and avail_ctx["coverage"] == "data"
+                and avail_ctx["modeled_impact"] == "high"
+                and adj["quality_after"] < settings.value_engine_min_quality
+                and result.get("value_engine_status") == STATUS_SELECTED
+            ):
+                result["value_engine_status"] = STATUS_REJECTED_AVAILABILITY
+                result["rejection_reason"] = (
+                    f"high_availability_risk: quality_after={adj['quality_after']:.3f}"
+                )
+
+        except Exception as exc:
+            logger.debug(
+                "ValueEngine: _enrich_with_availability fid=%s failed: %s",
+                fix.get("id"), exc,
+            )
 
     # ── Main enrichment ───────────────────────────────────────────────────────
 
@@ -404,7 +765,22 @@ class ValueEngineLiveAdapter:
                 "historical_sample_size": meta.get("n_train"),
                 "value_rank_score":       rank_score,
                 "provider_league_id":     prov_lid,
+                # Phase 5: filled by _enrich_with_availability (None until then)
+                "quality_before_availability":  None,
+                "availability_penalty":         None,
+                "availability_boost":           None,
+                "availability_coverage":        None,
+                "availability_modeled_impact":  None,
+                "availability_opponent_impact": None,
+                "availability_warning":         None,
+                # Phase 6: filled by _enrich_with_prematch (None until then)
+                "prematch_signal":              None,
             }
+
+            conn = self._get_conn()
+            if conn is not None:
+                self._enrich_with_availability(results[key], conn, fix, info, candidate)
+                self._enrich_with_prematch(results[key], conn, fix, candidate)
 
         n_ok  = sum(1 for v in results.values() if v.get("value_engine_status") == STATUS_SELECTED)
         n_err = sum(1 for v in results.values() if v.get("value_engine_status") == STATUS_ERROR)

@@ -124,6 +124,22 @@ def _pick_block(pred: dict, fix: dict, team_names: dict, league_names: dict) -> 
     if main_risk:
         lines.append(f"⚠️ {esc(main_risk)}")
 
+    # Availability impact hint (Phase 5) — only show when VE penalized the pick
+    try:
+        ve_meta = pred.get("value_engine_meta") or {}
+        if isinstance(ve_meta, dict):
+            avail = ve_meta.get("availability") or {}
+            a_coverage = avail.get("coverage")
+            a_impact   = avail.get("modeled_impact")
+            a_penalty  = avail.get("penalty") or 0.0
+            a_boost    = avail.get("boost") or 0.0
+            net = max(0.0, a_penalty - a_boost)
+            if a_coverage == "data" and a_impact in ("high", "medium") and net > 0.0:
+                impact_lbl = {"high": "alta", "medium": "media"}.get(a_impact, a_impact)
+                lines.append(f"🏥 Baja impacto {impact_lbl}  (−{net:.3f} calidad VE)")
+    except Exception:
+        pass
+
     return "\n".join(lines)
 
 
@@ -297,6 +313,10 @@ def format_partido(
     candidates: list[dict],
     team_names: dict[int, str],
     league_names: dict[int, str],
+    *,
+    availability: dict | None = None,
+    prematch: dict | None = None,
+    live_state: dict | None = None,
 ) -> str:
     """Build the full pre-match analysis message for /partido."""
     home   = esc(team_names.get(fixture["home_team_id"], "Local"))
@@ -380,6 +400,35 @@ def format_partido(
         lines.extend(ctx_lines)
         lines.append("")
 
+    # Availability (Phase 4) — optional, never raises
+    avail_lines = _format_availability_section(
+        availability,
+        home_id=fixture.get("home_team_id"),
+        away_id=fixture.get("away_team_id"),
+        team_names=team_names,
+    )
+    if avail_lines:
+        lines.append(f"{_SEP}")
+        lines.append("🏥 <b>Disponibilidad</b>")
+        lines.extend(avail_lines)
+        lines.append("")
+
+    # Prematch Intelligence (Phase 6) — optional, never raises
+    prematch_lines = _format_prematch_section(prematch)
+    if prematch_lines:
+        lines.append(f"{_SEP}")
+        lines.append("📡 <b>Prematch Intelligence</b>")
+        lines.extend(prematch_lines)
+        lines.append("")
+
+    # Live State (Phase 7) — optional, never raises
+    live_lines = _format_live_section(live_state)
+    if live_lines:
+        lines.append(f"{_SEP}")
+        lines.append("🔴 <b>Estado Live</b>")
+        lines.extend(live_lines)
+        lines.append("")
+
     # Summary verdict
     lines.append(f"{_SEP}")
     if best_picks:
@@ -447,6 +496,218 @@ def _format_context_summary(ctx: dict) -> list[str]:
     return lines
 
 
+def _format_availability_section(
+    availability: dict | None,
+    *,
+    home_id: int | None,
+    away_id: int | None,
+    team_names: dict[int, str],
+) -> list[str]:
+    """Return HTML lines for the availability section of /partido.
+
+    Returns an empty list when availability is None (no sync done yet).
+    Never raises — all exceptions are silently caught.
+    """
+    _IMPACT_ICONS = {
+        "none":    "✅",
+        "low":     "ℹ️",
+        "medium":  "📊",
+        "high":    "⚠️",
+        "unknown": "❓",
+    }
+    _IMPACT_TEXT = {
+        "none":    "Sin bajas confirmadas",
+        "low":     "Impacto bajo",
+        "medium":  "Impacto medio",
+        "high":    "Impacto ALTO",
+        "unknown": "Sin datos confirmados",
+    }
+
+    if availability is None:
+        return ["  ❓ Disponibilidad: sin datos confirmados"]
+
+    try:
+        summaries: dict = availability.get("summaries") or {}
+        injuries: list  = availability.get("injuries") or []
+        lineups: dict   = availability.get("lineups") or {}
+
+        inj_by_team: dict[int, list] = {}
+        for inj in injuries:
+            inj_by_team.setdefault(inj["team_id"], []).append(inj)
+
+        lines: list[str] = []
+        for team_id, label in [(home_id, "Local"), (away_id, "Visitante")]:
+            if team_id is None:
+                continue
+            summary = summaries.get(team_id)
+            name = esc(team_names.get(team_id, str(team_id)))
+
+            if summary is None:
+                lines.append(f"  {label} ({name}): ❓ Sin sync")
+                continue
+
+            impact = summary.get("impact_label") or "unknown"
+            coverage = summary.get("coverage_status") or "unknown"
+            icon = _IMPACT_ICONS.get(impact, "❓")
+            text = _IMPACT_TEXT.get(impact, impact)
+            missing = summary.get("missing_count", 0)
+
+            line = f"  {label} ({name}): {icon} {text}"
+            if missing:
+                line += f" ({missing} baja{'s' if missing > 1 else ''})"
+            lines.append(line)
+
+            # Show injured players (max 3)
+            team_injuries = inj_by_team.get(team_id, [])
+            for inj in team_injuries[:3]:
+                itype = inj.get("type") or "injured"
+                reason = inj.get("reason") or ""
+                reason_str = f" — {esc(reason[:30])}" if reason else ""
+                lines.append(
+                    f"    · {esc(inj['player_name'])} [{esc(itype)}]{reason_str}"
+                )
+            if len(team_injuries) > 3:
+                lines.append(f"    · ... y {len(team_injuries) - 3} más")
+
+            # Lineup formation if available
+            lu = lineups.get(team_id)
+            if lu and lu.get("formation"):
+                lines.append(f"    Formación: {esc(lu['formation'])}")
+
+            if coverage == "no_data":
+                lines.append(f"    <i>(API sin cobertura de lesiones para esta liga)</i>")
+
+        return lines
+
+    except Exception:
+        return ["  ❓ Disponibilidad: error al cargar datos"]
+
+
+def _format_prematch_section(prematch: dict | None) -> list[str]:
+    """Return HTML lines for the prematch intelligence section of /partido.
+
+    Returns [] if prematch is None (not synced yet). Never raises.
+    """
+    if prematch is None:
+        return []
+    try:
+        odds_mv  = prematch.get("odds_movement") or []
+        alerts   = prematch.get("alerts") or []
+        lineup   = prematch.get("lineup")
+        lines: list[str] = []
+
+        # Odds movement summary
+        if odds_mv:
+            _DIR_ICON = {"shortening": "📉", "drifting": "📈", "stable": "➡️"}
+            _STR_TEXT = {
+                "none": "estable", "low": "leve",
+                "medium": "notable", "high": "FUERTE",
+            }
+            high_drift = [
+                m for m in odds_mv
+                if m.get("movement_strength") in ("medium", "high")
+                and m.get("movement_direction") == "drifting"
+            ]
+            supporting = [
+                m for m in odds_mv
+                if m.get("movement_strength") in ("low", "medium", "high")
+                and m.get("movement_direction") == "shortening"
+            ]
+            if high_drift:
+                for m in high_drift[:2]:
+                    icon = _DIR_ICON.get(m["movement_direction"], "")
+                    stext = _STR_TEXT.get(m.get("movement_strength", "none"), "")
+                    lines.append(
+                        f"  {icon} Drift {stext} en {m['market_key']}/{m['selection']}"
+                        f"  ({m.get('opening_odds', '?'):.2f} → {m.get('current_odds', '?'):.2f})"
+                    )
+            elif supporting:
+                for m in supporting[:2]:
+                    icon = _DIR_ICON.get(m["movement_direction"], "")
+                    stext = _STR_TEXT.get(m.get("movement_strength", "none"), "")
+                    lines.append(
+                        f"  {icon} Cuota bajando {stext} en {m['market_key']}/{m['selection']}"
+                        f"  ({m.get('opening_odds', '?'):.2f} → {m.get('current_odds', '?'):.2f})"
+                    )
+            else:
+                lines.append("  ➡️ Cuotas estables — sin movimiento significativo")
+        else:
+            lines.append("  ❓ Cuotas: sin snapshot prematch registrado")
+
+        # Alerts
+        high_alerts = [a for a in alerts if a.get("severity") in ("high", "medium")]
+        for a in high_alerts[:2]:
+            sev_icon = "🔴" if a.get("severity") == "high" else "🟡"
+            lines.append(f"  {sev_icon} {esc(a.get('title', ''))}")
+
+        # Lineup status
+        if lineup:
+            if lineup.get("lineups_confirmed"):
+                home_f = lineup.get("home_formation") or "?"
+                away_f = lineup.get("away_formation") or "?"
+                lines.append(f"  ✅ Alineaciones confirmadas ({home_f} / {away_f})")
+                home_miss = lineup.get("home_missing_count", 0)
+                away_miss = lineup.get("away_missing_count", 0)
+                if home_miss or away_miss:
+                    lines.append(
+                        f"  🏥 Bajas: Local {home_miss} · Visitante {away_miss}"
+                    )
+            elif lineup.get("lineups_available"):
+                lines.append("  📋 Alineaciones disponibles (no confirmadas)")
+            else:
+                lines.append("  ⏳ Alineaciones: pendientes de publicación")
+        else:
+            lines.append("  ⏳ Alineaciones: sin datos prematch")
+
+        return lines
+
+    except Exception:
+        return []
+
+
+def _format_live_section(live_state: dict | None) -> list[str]:
+    """Return HTML lines for the live state section of /partido.
+
+    Returns [] if live_state is None (not tracked yet). Never raises.
+    """
+    if live_state is None:
+        return []
+    try:
+        _FINISHED = {"FT", "AET", "PEN", "WO"}
+        _STATUS_LABEL = {
+            "1H": "1T", "HT": "ET", "2H": "2T",
+            "ET": "Pról", "FT": "FT", "AET": "FT (pról)", "PEN": "FT (pens)",
+        }
+        _STATE_ICON  = {"winning": "✅", "losing": "❌", "open": "⬜"}
+        _STATE_LABEL = {"winning": "ganando", "losing": "perdiendo", "open": "abierto"}
+        _MKT_LABEL   = {"1X2": "1X2", "OU25": "O/U 2.5", "BTTS": "BTTS", "DC": "DC"}
+
+        status   = live_state.get("status_short", "?")
+        elapsed  = live_state.get("status_elapsed")
+        gh       = live_state.get("goals_home", 0) or 0
+        ga       = live_state.get("goals_away", 0) or 0
+        picks    = live_state.get("picks") or []
+        is_fin   = live_state.get("is_finished", False)
+
+        status_label = _STATUS_LABEL.get(status, status)
+        elapsed_str  = f" {elapsed}'" if elapsed and not is_fin else ""
+        score_str    = f"{gh}–{ga}"
+
+        lines: list[str] = []
+        lines.append(f"  Marcador: <b>{score_str}</b>  [{status_label}{elapsed_str}]")
+
+        for pk in picks[:4]:
+            icon  = _STATE_ICON.get(pk.get("live_state", "open"), "❓")
+            label = _STATE_LABEL.get(pk.get("live_state", "open"), "?")
+            mkt   = _MKT_LABEL.get(pk.get("market_key", ""), pk.get("market_key", "?"))
+            sel   = esc(pk.get("selection", "?"))
+            lines.append(f"  {icon} {mkt}/{sel}  <i>{label}</i>")
+
+        return lines
+    except Exception:
+        return []
+
+
 # ── /estado ───────────────────────────────────────────────────────────────────
 
 
@@ -480,8 +741,17 @@ def format_estado(
         d_lim = rate_state.get("requests_limit", "?")
         m_rem = rate_state.get("minute_remaining", "?")
         m_lim = rate_state.get("minute_limit", "?")
+        # Budget status label
+        try:
+            from app.services.api_budget_service import get_daily_state as _gds
+            _bs = _gds()
+            _bstatus = {"ok": "", "warning": " ⚠️", "critical": " 🔴", "unknown": ""}.get(
+                _bs.get("status", "unknown"), ""
+            )
+        except Exception:
+            _bstatus = ""
         lines.append(
-            f"🌐 API-Football: <b>{d_rem}/{d_lim}</b> diarias  ·  <b>{m_rem}/{m_lim}</b>/min"
+            f"🌐 API-Football: <b>{d_rem}/{d_lim}</b> diarias{_bstatus}  ·  <b>{m_rem}/{m_lim}</b>/min"
         )
     else:
         lines.append("🌐 API-Football: sin datos (ejecuta sync para actualizar)")

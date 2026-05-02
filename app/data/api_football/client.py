@@ -15,6 +15,8 @@ What this client does NOT do:
 
 import asyncio
 import logging
+import time
+from collections.abc import Callable
 from typing import AsyncGenerator
 
 import httpx
@@ -22,6 +24,21 @@ import httpx
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+# ── Per-call hook (optional, registered externally to avoid circular imports) ──
+# Signature: hook(endpoint: str, duration_ms: int, status_code: int, results: int)
+_call_hook: Callable | None = None
+
+
+def register_call_hook(fn: Callable) -> None:
+    """Register a callback invoked after every successful API response.
+
+    The hook receives (endpoint, duration_ms, status_code, results_count).
+    Hook failures are swallowed so they never break an API call.
+    """
+    global _call_hook
+    _call_hook = fn
+
 
 # ── In-memory rate-limit state (updated from every response) ──────────────────
 # Reflects the most recently observed headers; reset to None on startup.
@@ -91,6 +108,7 @@ class APIFootballClient:
         logger.debug("API-Football GET %s | params=%s", path, params)
 
         for attempt in range(1, self.MAX_RETRIES + 2):
+            _t0 = time.monotonic()
             try:
                 async with httpx.AsyncClient(
                     headers=self._headers, timeout=30.0
@@ -155,6 +173,15 @@ class APIFootballClient:
 
             results = data.get("results", 0)
             logger.debug("API-Football %s → %d resultado(s)", path, results)
+
+            # Fire per-call hook (budget logging, etc.) — never raises
+            if _call_hook is not None:
+                try:
+                    duration_ms = int((time.monotonic() - _t0) * 1000)
+                    _call_hook(path, duration_ms, response.status_code, results)
+                except Exception:
+                    pass
+
             return data
 
         raise RuntimeError(f"API-Football: máximo de reintentos superado para {path}")

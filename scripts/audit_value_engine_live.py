@@ -170,6 +170,19 @@ def main() -> None:
         print(f"\n  [INFO] VALUE_ENGINE_ENABLED=false — el motor esta desactivado.")
         print(f"  Para activar en shadow: VALUE_ENGINE_ENABLED=true VALUE_ENGINE_MODE=shadow")
 
+    print(f"\n  CONFIG DISPONIBILIDAD (PHASE 5)")
+    print(f"  USE_AVAILABILITY         : {_yn(settings.value_engine_use_availability)}")
+    if settings.value_engine_use_availability:
+        print(f"  Penalty high / med / low : "
+              f"{settings.value_engine_availability_high_penalty:.3f} / "
+              f"{settings.value_engine_availability_medium_penalty:.3f} / "
+              f"{settings.value_engine_availability_low_penalty:.3f}")
+        print(f"  Boost opp_high / opp_med : "
+              f"{settings.value_engine_availability_opponent_high_boost:.3f} / "
+              f"{settings.value_engine_availability_opponent_medium_boost:.3f}")
+        print(f"  Max penalty cap          : {settings.value_engine_availability_max_penalty:.3f}")
+        print(f"  Reject high risk         : {_yn(settings.value_engine_reject_high_availability_risk)}")
+
     # ── DuckDB ─────────────────────────────────────────────────────────────────
     print(f"\n  ESTADO DUCKDB LOCAL")
     db = _check_duckdb(settings.value_engine_local_db_path)
@@ -306,6 +319,40 @@ def main() -> None:
     print(f"  Con odds actuales         : {_pct(n_has_odds, n_fixtures)}")
     print(f"  Con pick_candidates       : {_pct(n_has_candidates, n_fixtures)}")
     print(f"  Candidatos evaluables (estimado): {n_would_pass}")
+
+    # ── Availability coverage in DuckDB ───────────────────────────────────────
+    if conn is not None and settings.value_engine_use_availability:
+        try:
+            prov_fixture_ids = [
+                f["provider_fixture_id"] for f in fixtures
+                if f.get("provider_fixture_id")
+            ]
+            if prov_fixture_ids:
+                placeholders = ", ".join("?" * len(prov_fixture_ids))
+                avail_rows = conn.execute(
+                    f"""
+                    SELECT provider_fixture_id, impact_label, coverage_status
+                    FROM team_availability_summary
+                    WHERE provider_fixture_id IN ({placeholders})
+                    """,
+                    prov_fixture_ids,
+                ).fetchall()
+                avail_fids = {r[0] for r in avail_rows}
+                avail_with_data = {r[0] for r in avail_rows if r[2] == "data"}
+                print(f"\n  DISPONIBILIDAD EN DUCKDB")
+                print(f"  Fixtures con summary       : {_pct(len(avail_fids), len(prov_fixture_ids))}")
+                print(f"  Fixtures con datos reales  : {_pct(len(avail_with_data), len(prov_fixture_ids))}")
+                impact_counts: dict[str, int] = {}
+                for r in avail_rows:
+                    lbl = r[1] or "unknown"
+                    impact_counts[lbl] = impact_counts.get(lbl, 0) + 1
+                if impact_counts:
+                    print(f"  Distribucion impact (team summaries):")
+                    for lbl in ("high", "medium", "low", "none", "unknown"):
+                        if impact_counts.get(lbl):
+                            print(f"    {lbl:10}: {impact_counts[lbl]}")
+        except Exception as exc:
+            print(f"\n  DISPONIBILIDAD: tabla no encontrada o error ({exc})")
 
     # ── Fixture detail ─────────────────────────────────────────────────────────
     print(f"\n  DETALLE FIXTURES")

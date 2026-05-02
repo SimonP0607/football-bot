@@ -124,6 +124,190 @@ class Settings:
         os.getenv("VALUE_ENGINE_FALLBACK_TO_CURRENT", "true").strip().lower() == "true"
     )
 
+    # ── Phase 5: Availability-Aware Value Engine ──────────────────────────────
+    # Master switch: if false, availability is never loaded and quality_score is
+    # never adjusted. Defaults to true so the feature is active once availability
+    # data exists in DuckDB, but only penalizes when coverage='known'.
+    value_engine_use_availability: bool = (
+        os.getenv("VALUE_ENGINE_USE_AVAILABILITY", "true").strip().lower() == "true"
+    )
+    # Maximum total net penalty applied to quality_score (cap).
+    value_engine_availability_max_penalty: float = _float(
+        "VALUE_ENGINE_AVAILABILITY_MAX_PENALTY", 0.06
+    )
+    # Penalty by modeled-team impact level.
+    value_engine_availability_high_penalty: float = _float(
+        "VALUE_ENGINE_AVAILABILITY_HIGH_PENALTY", 0.06
+    )
+    value_engine_availability_medium_penalty: float = _float(
+        "VALUE_ENGINE_AVAILABILITY_MEDIUM_PENALTY", 0.03
+    )
+    value_engine_availability_low_penalty: float = _float(
+        "VALUE_ENGINE_AVAILABILITY_LOW_PENALTY", 0.01
+    )
+    # Conservative boost when the OPPONENT of the modeled team has injuries.
+    value_engine_availability_opponent_high_boost: float = _float(
+        "VALUE_ENGINE_AVAILABILITY_OPPONENT_HIGH_BOOST", 0.02
+    )
+    value_engine_availability_opponent_medium_boost: float = _float(
+        "VALUE_ENGINE_AVAILABILITY_OPPONENT_MEDIUM_BOOST", 0.01
+    )
+    # If true, candidates where modeled-team impact='high' and quality_after <
+    # value_engine_min_quality are hard-rejected by the Value Engine.
+    # Off by default — availability is informational, not a gate.
+    value_engine_reject_high_availability_risk: bool = (
+        os.getenv("VALUE_ENGINE_REJECT_HIGH_AVAILABILITY_RISK", "false").strip().lower() == "true"
+    )
+
+    # ── Phase 6: Prematch Intelligence & Odds Movement ───────────────────────
+    prematch_intelligence_enabled: bool = (
+        os.getenv("PREMATCH_INTELLIGENCE_ENABLED", "true").strip().lower() == "true"
+    )
+    # Default window for upcoming fixtures (hours before kickoff to include).
+    prematch_refresh_hours: int = _int("PREMATCH_REFRESH_HOURS", 6)
+    # How close to kickoff (minutes) before we attempt to fetch confirmed lineups.
+    prematch_lineups_window_minutes: int = _int("PREMATCH_LINEUPS_WINDOW_MINUTES", 120)
+    # API call budget cap for a single prematch sync run.
+    prematch_max_requests: int = _int("PREMATCH_MAX_REQUESTS", 500)
+    # Implied-probability thresholds for movement strength classification.
+    prematch_odds_movement_high: float   = _float("PREMATCH_ODDS_MOVEMENT_HIGH", 0.05)
+    prematch_odds_movement_medium: float = _float("PREMATCH_ODDS_MOVEMENT_MEDIUM", 0.025)
+    # Value Engine adjustments driven by prematch signals.
+    prematch_penalty_high_drift: float   = _float("PREMATCH_PENALTY_HIGH_DRIFT", 0.04)
+    prematch_penalty_medium_drift: float = _float("PREMATCH_PENALTY_MEDIUM_DRIFT", 0.02)
+    prematch_boost_supporting_move: float = _float("PREMATCH_BOOST_SUPPORTING_MOVE", 0.01)
+    # If true, automatically reject picks with high-severity prematch drift.
+    prematch_reject_high_risk: bool = (
+        os.getenv("PREMATCH_REJECT_HIGH_RISK", "false").strip().lower() == "true"
+    )
+
+    # ── Phase 7: Live Monitoring ──────────────────────────────────────────────
+    # Master switch — if false, live_monitor_service never runs.
+    live_monitor_enabled: bool = (
+        os.getenv("LIVE_MONITOR_ENABLED", "true").strip().lower() == "true"
+    )
+    # How many hours before kickoff to start tracking a fixture.
+    live_monitor_hours_before: float = _float("LIVE_MONITOR_HOURS_BEFORE", 0.5)
+    # How many hours after kickoff to keep polling (safety net for long matches).
+    live_monitor_hours_after: float = _float("LIVE_MONITOR_HOURS_AFTER", 3.0)
+    # Maximum API calls per monitor run.
+    live_monitor_max_requests: int = _int("LIVE_MONITOR_MAX_REQUESTS", 50)
+    # Seconds between polls in --loop mode.
+    live_monitor_interval_seconds: int = _int("LIVE_MONITOR_INTERVAL_SECONDS", 60)
+    # Minimum match elapsed (minutes) before state-change notifications are sent.
+    live_monitor_min_elapsed_notify: int = _int("LIVE_MONITOR_MIN_ELAPSED_NOTIFY", 15)
+    # If true, auto-settle finished fixtures during monitor run.
+    live_monitor_auto_settle: bool = (
+        os.getenv("LIVE_MONITOR_AUTO_SETTLE", "true").strip().lower() == "true"
+    )
+    # If true, send Telegram push notifications for state changes.
+    live_monitor_notify: bool = (
+        os.getenv("LIVE_MONITOR_NOTIFY", "false").strip().lower() == "true"
+    )
+
+    # ── Phase 8: Smart Parlay Engine ──────────────────────────────────────────
+    parlay_engine_enabled: bool = (
+        os.getenv("PARLAY_ENGINE_ENABLED", "false").strip().lower() == "true"
+    )
+    # Maximum legs per parlay (capped at 4 for risk control).
+    parlay_max_legs: int = _int("PARLAY_MAX_LEGS", 4)
+    # Minimum edge for the whole parlay (joint_prob - implied_prob).
+    parlay_min_edge: float = _float("PARLAY_MIN_EDGE", 0.03)
+    # Minimum expected value (EV = joint_prob * total_odds - 1).
+    parlay_min_ev: float = _float("PARLAY_MIN_EV", 0.02)
+    # Minimum average confidence score across legs.
+    parlay_min_confidence: float = _float("PARLAY_MIN_CONFIDENCE", 0.55)
+    # Maximum allowed correlation score (0=none, 1=full).
+    parlay_max_correlation: float = _float("PARLAY_MAX_CORRELATION", 0.45)
+    # Maximum allowed risk score.
+    parlay_max_risk: float = _float("PARLAY_MAX_RISK", 0.60)
+    # Allow two legs from the same fixture (experimental, default off).
+    parlay_allow_same_fixture: bool = (
+        os.getenv("PARLAY_ALLOW_SAME_FIXTURE", "false").strip().lower() == "true"
+    )
+    # Maximum picks from the same league in one parlay.
+    parlay_max_same_league: int = _int("PARLAY_MAX_SAME_LEAGUE", 2)
+    # Maximum recommended parlays to save per day.
+    parlay_max_per_day: int = _int("PARLAY_MAX_PER_DAY", 5)
+    # Default stake in units for ROI calculations.
+    parlay_default_stake_units: float = _float("PARLAY_DEFAULT_STAKE_UNITS", 0.25)
+
+    # ── Phase 9: Conversational AI Router ────────────────────────────────────
+    # Master switch — if false, text messages are not processed by the router.
+    ai_router_enabled: bool = (
+        os.getenv("AI_ROUTER_ENABLED", "false").strip().lower() == "true"
+    )
+    # Provider: "rules" (no external API) or "openai" (optional).
+    ai_router_provider: str = os.getenv("AI_ROUTER_PROVIDER", "rules").strip()
+    # External model name (e.g. "gpt-4o-mini"). Only used when provider=openai.
+    ai_router_model: str = os.getenv("AI_ROUTER_MODEL", "").strip()
+    # Max seconds to wait for external provider response before falling back.
+    ai_router_timeout_seconds: int = _int("AI_ROUTER_TIMEOUT_SECONDS", 8)
+    # Max tokens for external provider response.
+    ai_router_max_tokens: int = _int("AI_ROUTER_MAX_TOKENS", 500)
+    # Minimum confidence threshold (below this, ask for clarification).
+    ai_router_min_confidence: float = _float("AI_ROUTER_MIN_CONFIDENCE", 0.60)
+    # Allow parlay-related routing.
+    ai_router_allow_parlay: bool = (
+        os.getenv("AI_ROUTER_ALLOW_PARLAY", "true").strip().lower() == "true"
+    )
+    # Allow live-monitoring routing.
+    ai_router_allow_live: bool = (
+        os.getenv("AI_ROUTER_ALLOW_LIVE", "true").strip().lower() == "true"
+    )
+    # Allow free-text explanations (e.g. "¿qué es el edge?").
+    ai_router_allow_explanations: bool = (
+        os.getenv("AI_ROUTER_ALLOW_EXPLANATIONS", "true").strip().lower() == "true"
+    )
+    # Log all queries to DuckDB ai_router_logs table.
+    ai_router_log_queries: bool = (
+        os.getenv("AI_ROUTER_LOG_QUERIES", "true").strip().lower() == "true"
+    )
+    # Safe mode: always prepend responsible gambling disclaimer to parlay responses.
+    ai_router_safe_mode: bool = (
+        os.getenv("AI_ROUTER_SAFE_MODE", "true").strip().lower() == "true"
+    )
+
+    # ── Phase 10: Scheduler & Proactive Alerts ───────────────────────────────
+    # Master switch — if false, no jobs are registered on the JobQueue.
+    scheduler_enabled: bool = (
+        os.getenv("SCHEDULER_ENABLED", "false").strip().lower() == "true"
+    )
+    scheduler_timezone: str = os.getenv("SCHEDULER_TIMEZONE", "America/Bogota").strip()
+    # Daily sync job
+    scheduler_daily_sync_enabled: bool = (
+        os.getenv("SCHEDULER_DAILY_SYNC_ENABLED", "true").strip().lower() == "true"
+    )
+    scheduler_daily_sync_time: str = os.getenv("SCHEDULER_DAILY_SYNC_TIME", "06:30").strip()
+    # Prematch refresh job
+    scheduler_prematch_enabled: bool = (
+        os.getenv("SCHEDULER_PREMATCH_ENABLED", "true").strip().lower() == "true"
+    )
+    # Comma-separated minutes before kickoff to trigger a prematch refresh (e.g. 180,90,30)
+    scheduler_prematch_windows: str = os.getenv("SCHEDULER_PREMATCH_WINDOWS", "180,90,30").strip()
+    scheduler_prematch_max_fixtures: int = _int("SCHEDULER_PREMATCH_MAX_FIXTURES", 40)
+    # Live monitor job
+    scheduler_live_monitor_enabled: bool = (
+        os.getenv("SCHEDULER_LIVE_MONITOR_ENABLED", "true").strip().lower() == "true"
+    )
+    scheduler_live_interval_seconds: int = _int("SCHEDULER_LIVE_INTERVAL_SECONDS", 60)
+    # Settlement job
+    scheduler_settlement_enabled: bool = (
+        os.getenv("SCHEDULER_SETTLEMENT_ENABLED", "true").strip().lower() == "true"
+    )
+    scheduler_settlement_time: str = os.getenv("SCHEDULER_SETTLEMENT_TIME", "23:00").strip()
+    # Daily report job
+    scheduler_daily_report_enabled: bool = (
+        os.getenv("SCHEDULER_DAILY_REPORT_ENABLED", "true").strip().lower() == "true"
+    )
+    scheduler_report_time: str = os.getenv("SCHEDULER_REPORT_TIME", "07:00").strip()
+    # API budget guard — max API calls the scheduler can use per day
+    scheduler_api_budget_daily: int = _int("SCHEDULER_API_BUDGET_DAILY", 50)
+    # If true, send Telegram notifications for completed jobs and alerts
+    scheduler_notify_alerts: bool = (
+        os.getenv("SCHEDULER_NOTIFY_ALERTS", "true").strip().lower() == "true"
+    )
+
     # ── Política de ingestión histórica (Phase 3) ─────────────────────────────
     # Máximo de temporadas cerradas a conservar por liga en DuckDB.
     history_max_closed_seasons: int = _int("HISTORY_MAX_CLOSED_SEASONS", 4)

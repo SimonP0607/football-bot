@@ -58,7 +58,11 @@ async def top_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             "Usa /estado para ver el estado del sistema y revisa los logs."
         )
 
-    await send_html(update.message, text)
+    from app.bot.ui.keyboard import top_actions_keyboard
+    try:
+        await update.message.reply_html(text, reply_markup=top_actions_keyboard())
+    except Exception:
+        await send_html(update.message, text)
 
 
 def _build_ve_summary(fixtures: list[dict], mode: str) -> dict | None:

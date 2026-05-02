@@ -6,7 +6,7 @@ Table: pick_results  (migration 012_settlement.sql)
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from app.data.repositories.supabase_client import get_supabase
 
@@ -147,3 +147,93 @@ def get_roi_summary() -> dict:
         "total_profit_units": round(total_profit, 4),
         "roi_pct": round(roi, 2),
     }
+
+
+def get_settled(
+    days: int | None = None,
+    market: str | None = None,
+) -> list[dict]:
+    """Return settled pick_results, optionally filtered by period and market.
+
+    Ordered by settled_at DESC. Excludes pending rows.
+    """
+    client = get_supabase()
+    q = (
+        client.table("pick_results")
+        .select("*")
+        .neq("result_status", "pending")
+        .order("settled_at", desc=True)
+    )
+    if days is not None:
+        since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+        q = q.gte("settled_at", since)
+    if market:
+        q = q.eq("market_key", market)
+    return q.execute().data or []
+
+
+def get_all_pending_with_fixtures() -> list[dict]:
+    """Return all pending pick_results joined with basic fixture info.
+
+    Used by settle_results.py to determine which fixtures need settlement.
+    """
+    client = get_supabase()
+    rows = (
+        client.table("pick_results")
+        .select("*")
+        .eq("result_status", "pending")
+        .order("created_at", desc=False)
+        .execute()
+    ).data or []
+    if not rows:
+        return rows
+
+    fixture_ids = list({r["fixture_id"] for r in rows})
+    fix_rows = (
+        client.table("fixtures")
+        .select("id, provider_fixture_id, kickoff_at, status_short")
+        .in_("id", fixture_ids)
+        .execute()
+    ).data or []
+    fix_map = {f["id"]: f for f in fix_rows}
+
+    for row in rows:
+        row["_fixture"] = fix_map.get(row["fixture_id"], {})
+    return rows
+
+
+def compute_performance_stats(rows: list[dict]) -> dict:
+    """Compute win/loss/ROI metrics from a list of settled pick_results rows.
+
+    Args:
+        rows: pick_results rows (all must have result_status != 'pending').
+
+    Returns dict with: total, settled, wins, losses, voids, profit_units,
+                       roi_pct, hit_rate_pct.
+    """
+    wins   = [r for r in rows if r["result_status"] == "win"]
+    losses = [r for r in rows if r["result_status"] == "loss"]
+    voids  = [r for r in rows if r["result_status"] == "void"]
+    settled = wins + losses
+    profit = sum(float(r.get("profit_units") or 0) for r in rows)
+    roi = profit / len(settled) * 100 if settled else 0.0
+    hit_rate = len(wins) / len(settled) * 100 if settled else 0.0
+    return {
+        "total": len(rows),
+        "settled": len(settled),
+        "wins": len(wins),
+        "losses": len(losses),
+        "voids": len(voids),
+        "profit_units": round(profit, 4),
+        "roi_pct": round(roi, 2),
+        "hit_rate_pct": round(hit_rate, 2),
+    }
+
+
+def get_stats_by_market(rows: list[dict]) -> dict[str, dict]:
+    """Break down compute_performance_stats() per market_key."""
+    by_market: dict[str, list] = {}
+    for r in rows:
+        mk = r.get("market_key", "?")
+        by_market.setdefault(mk, []).append(r)
+    return {mk: compute_performance_stats(v) for mk, v in sorted(by_market.items())}

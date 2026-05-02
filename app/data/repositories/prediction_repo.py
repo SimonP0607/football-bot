@@ -119,11 +119,27 @@ def update_value_metrics(fixture_id: int, market: str, selection: str, value_res
     from datetime import datetime, timezone
     import json as _json
     client = get_supabase()
+    avail_coverage = value_result.get("availability_coverage")
+    avail_sub: dict | None = (
+        {
+            "coverage":        avail_coverage,
+            "modeled_impact":  value_result.get("availability_modeled_impact"),
+            "opponent_impact": value_result.get("availability_opponent_impact"),
+            "penalty":         value_result.get("availability_penalty"),
+            "boost":           value_result.get("availability_boost"),
+            "quality_before":  value_result.get("quality_before_availability"),
+            "warning":         value_result.get("availability_warning"),
+        }
+        if avail_coverage is not None
+        else None
+    )
     meta_blob = {
         "model_scope":            value_result.get("model_scope"),
         "calibrator_scope":       value_result.get("calibrator_scope"),
         "historical_sample_size": value_result.get("historical_sample_size"),
         "value_rank_score":       value_result.get("value_rank_score"),
+        "availability":           avail_sub,
+        "prematch":               value_result.get("prematch_signal"),
     }
     payload = {
         "value_engine_status":     value_result.get("value_engine_status"),

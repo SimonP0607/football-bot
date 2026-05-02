@@ -256,6 +256,63 @@ async def fetch_active_leagues(league_ids: list[int] | None = None) -> list[dict
 # ── Phase C: Fixtures ─────────────────────────────────────────────────────────
 
 
+async def fetch_fixtures_by_ids(provider_fixture_ids: list[int]) -> list[dict]:
+    """Fetch current status + goals for multiple fixture IDs from /fixtures?ids=.
+
+    Batches up to 20 IDs per request. Used by settle_results.py for settlement.
+    Returns list of {provider_fixture_id, status_short, goals_home, goals_away}.
+    Only costs 1 API call per 20 fixtures.
+    """
+    if not provider_fixture_ids:
+        return []
+    results: list[dict] = []
+    for i in range(0, len(provider_fixture_ids), 20):
+        batch = provider_fixture_ids[i : i + 20]
+        ids_str = "-".join(str(fid) for fid in batch)
+        logger.info("fetch_fixtures_by_ids: batch %d ids", len(batch))
+        data = await api_client.get("/fixtures", params={"ids": ids_str})
+        for item in data.get("response", []):
+            fix_info = item.get("fixture", {})
+            goals = item.get("goals", {})
+            results.append({
+                "provider_fixture_id": fix_info.get("id"),
+                "status_short": fix_info.get("status", {}).get("short"),
+                "goals_home": goals.get("home"),
+                "goals_away": goals.get("away"),
+            })
+    logger.info("fetch_fixtures_by_ids: %d total results", len(results))
+    return results
+
+
+async def fetch_fixture_live_states(provider_fixture_ids: list[int]) -> list[dict]:
+    """Same as fetch_fixtures_by_ids but also returns status_elapsed.
+
+    Returns list of {provider_fixture_id, status_short, status_elapsed, goals_home, goals_away}.
+    Batches up to 20 IDs per request.
+    """
+    if not provider_fixture_ids:
+        return []
+    results: list[dict] = []
+    for i in range(0, len(provider_fixture_ids), 20):
+        batch = provider_fixture_ids[i : i + 20]
+        ids_str = "-".join(str(fid) for fid in batch)
+        logger.info("fetch_fixture_live_states: batch %d ids", len(batch))
+        data = await api_client.get("/fixtures", params={"ids": ids_str})
+        for item in data.get("response", []):
+            fix_info = item.get("fixture", {})
+            goals = item.get("goals", {})
+            status = fix_info.get("status", {})
+            results.append({
+                "provider_fixture_id": fix_info.get("id"),
+                "status_short": status.get("short"),
+                "status_elapsed": status.get("elapsed"),
+                "goals_home": goals.get("home"),
+                "goals_away": goals.get("away"),
+            })
+    logger.info("fetch_fixture_live_states: %d total results", len(results))
+    return results
+
+
 async def fetch_fixtures(
     date: str, league_id: int, season: int, timezone: str | None = None
 ) -> list[dict]:
@@ -343,7 +400,8 @@ async def fetch_team_statistics(
 async def fetch_injuries(fixture_id: int) -> list[dict]:
     """Return injury list for a fixture from /injuries.
 
-    Returns a list of dicts with player name, type (injured/suspended), and team id.
+    Returns a list of dicts with player id/name, type (injured/suspended), team id.
+    player_id may be None for some API responses.
     """
     data = await api_client.get("/injuries", params={"fixture": fixture_id})
     items: list[dict] = data.get("response", [])
@@ -352,6 +410,7 @@ async def fetch_injuries(fixture_id: int) -> list[dict]:
         player = item.get("player", {})
         team = item.get("team", {})
         result.append({
+            "player_id": player.get("id"),
             "player_name": player.get("name"),
             "type": player.get("type"),
             "reason": player.get("reason"),
@@ -515,3 +574,167 @@ async def fetch_lineups(fixture_id: int) -> dict:
         {k: v.get("formation") for k, v in result.items()}
     )
     return result
+
+
+# ── Phase 3: Entity catalog ───────────────────────────────────────────────────
+
+
+async def fetch_teams(league_id: int, season: int) -> list[dict]:
+    """Return teams for a league/season from /teams.
+
+    Each item includes team identity (id, name, code, country, national, logo,
+    founded) and venue info (id, name, city, capacity).
+    """
+    data = await api_client.get("/teams", params={"league": league_id, "season": season})
+    items: list[dict] = data.get("response", [])
+    result: list[dict] = []
+    for item in items:
+        team = item.get("team", {})
+        venue = item.get("venue", {})
+        tid = team.get("id")
+        if not tid:
+            continue
+        result.append({
+            "provider_team_id": tid,
+            "name": team.get("name", ""),
+            "code": team.get("code"),
+            "country": team.get("country"),
+            "founded": team.get("founded"),
+            "is_national": bool(team.get("national", False)),
+            "logo": team.get("logo"),
+            "venue_id": venue.get("id"),
+            "venue_name": venue.get("name"),
+            "venue_city": venue.get("city"),
+            "venue_capacity": venue.get("capacity"),
+        })
+    logger.debug("fetch_teams league=%s season=%s → %d equipos", league_id, season, len(result))
+    return result
+
+
+async def fetch_team_by_id(team_id: int) -> dict | None:
+    """Return identity info for a single team from /teams?id=.
+
+    Returns a flat dict or None if not found.
+    """
+    data = await api_client.get("/teams", params={"id": team_id})
+    items: list[dict] = data.get("response", [])
+    if not items:
+        return None
+    item = items[0]
+    team = item.get("team", {})
+    venue = item.get("venue", {})
+    return {
+        "provider_team_id": team.get("id"),
+        "name": team.get("name", ""),
+        "code": team.get("code"),
+        "country": team.get("country"),
+        "founded": team.get("founded"),
+        "is_national": bool(team.get("national", False)),
+        "logo": team.get("logo"),
+        "venue_id": venue.get("id"),
+        "venue_name": venue.get("name"),
+        "venue_city": venue.get("city"),
+        "venue_capacity": venue.get("capacity"),
+    }
+
+
+async def fetch_players_squad(team_id: int) -> list[dict]:
+    """Return basic squad list for a team from /players/squads.
+
+    Cheap endpoint (1 call per team, no pagination). Returns minimal player
+    info: id, name, age, number, position, photo. No career statistics.
+    """
+    data = await api_client.get("/players/squads", params={"team": team_id})
+    items: list[dict] = data.get("response", [])
+    players: list[dict] = []
+    for item in items:
+        for p in item.get("players", []):
+            pid = p.get("id")
+            if not pid:
+                continue
+            players.append({
+                "provider_player_id": pid,
+                "name": p.get("name", ""),
+                "age": p.get("age"),
+                "number": p.get("number"),
+                "position": p.get("position"),
+                "photo": p.get("photo"),
+            })
+    logger.debug("fetch_players_squad team=%s → %d jugadores", team_id, len(players))
+    return players
+
+
+async def fetch_players_by_team_season(
+    team_id: int, season: int, page: int = 1
+) -> tuple[list[dict], int]:
+    """Return detailed players for a team/season from /players (paginated).
+
+    Returns (players_list, total_pages). Each player includes full identity
+    plus career stats for the season. Use sparingly — costs 1 call per page,
+    typically 20-25 players per page.
+    """
+    data = await api_client.get(
+        "/players", params={"team": team_id, "season": season, "page": page}
+    )
+    paging = data.get("paging", {})
+    total_pages: int = paging.get("total", 1)
+    items: list[dict] = data.get("response", [])
+    players: list[dict] = []
+    for item in items:
+        p = item.get("player", {})
+        birth = p.get("birth", {})
+        pid = p.get("id")
+        if not pid:
+            continue
+        players.append({
+            "provider_player_id": pid,
+            "name": p.get("name", ""),
+            "firstname": p.get("firstname"),
+            "lastname": p.get("lastname"),
+            "age": p.get("age"),
+            "birth_date": birth.get("date"),
+            "birth_place": birth.get("place"),
+            "birth_country": birth.get("country"),
+            "nationality": p.get("nationality"),
+            "height": p.get("height"),
+            "weight": p.get("weight"),
+            "injured": bool(p.get("injured", False)),
+            "photo": p.get("photo"),
+        })
+    logger.debug(
+        "fetch_players_by_team_season team=%s season=%s page=%s/%s → %d",
+        team_id, season, page, total_pages, len(players),
+    )
+    return players, total_pages
+
+
+async def fetch_player_by_id(player_id: int, season: int | None = None) -> dict | None:
+    """Return identity info for a single player from /players.
+
+    Returns a flat dict or None if not found.
+    """
+    params: dict = {"id": player_id}
+    if season:
+        params["season"] = season
+    data = await api_client.get("/players", params=params)
+    items: list[dict] = data.get("response", [])
+    if not items:
+        return None
+    item = items[0]
+    p = item.get("player", {})
+    birth = p.get("birth", {})
+    return {
+        "provider_player_id": p.get("id"),
+        "name": p.get("name", ""),
+        "firstname": p.get("firstname"),
+        "lastname": p.get("lastname"),
+        "age": p.get("age"),
+        "birth_date": birth.get("date"),
+        "birth_place": birth.get("place"),
+        "birth_country": birth.get("country"),
+        "nationality": p.get("nationality"),
+        "height": p.get("height"),
+        "weight": p.get("weight"),
+        "injured": bool(p.get("injured", False)),
+        "photo": p.get("photo"),
+    }

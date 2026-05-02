@@ -17,13 +17,15 @@ _VE_SKIPPED    = "value_skipped_engine_off"
 
 # Display labels for each VE rejection status
 _STATUS_LABELS: dict[str, str] = {
-    "value_selected":                    "Pasaron VE",
-    "value_rejected_low_quality":        "Calidad insuficiente (quality_score)",
-    "value_rejected_low_edge":           "Edge VE insuficiente",
-    "value_rejected_missing_odds":       "Sin cuotas ofrecidas",
-    "value_rejected_missing_history":    "Sin historial en DuckDB",
-    "value_rejected_missing_calibrator": "Sin calibrador en DuckDB",
-    "value_error_fallback":              "Error en evaluación",
+    "value_selected":                           "Pasaron VE",
+    "value_rejected_low_quality":               "Calidad insuficiente (quality_score)",
+    "value_rejected_low_edge":                  "Edge VE insuficiente",
+    "value_rejected_missing_odds":              "Sin cuotas ofrecidas",
+    "value_rejected_missing_history":           "Sin historial en DuckDB",
+    "value_rejected_missing_calibrator":        "Sin calibrador en DuckDB",
+    "value_rejected_high_availability_risk":    "Rechazados por riesgo disponibilidad",
+    "value_rejected_high_prematch_drift":       "Rechazados por drift prematch alto",
+    "value_error_fallback":                     "Error en evaluación",
 }
 
 
@@ -69,6 +71,29 @@ def _build_valor_text() -> str:
     lines.append(
         f"Fallback modelo: <b>{'sí' if settings.value_engine_fallback_to_current else 'no'}</b>"
     )
+    if settings.value_engine_use_availability:
+        lines.append(
+            f"Disponibilidad:  <b>activa</b>  "
+            f"(h={settings.value_engine_availability_high_penalty:.2f}/"
+            f"m={settings.value_engine_availability_medium_penalty:.2f}/"
+            f"l={settings.value_engine_availability_low_penalty:.2f}  "
+            f"cap={settings.value_engine_availability_max_penalty:.2f})"
+        )
+        if settings.value_engine_reject_high_availability_risk:
+            lines.append("  ⚠️ Rechazo por riesgo alto: <b>activo</b>")
+    else:
+        lines.append("Disponibilidad:  <b>inactiva</b>")
+    prematch_on = settings.prematch_intelligence_enabled
+    lines.append(
+        f"Prematch:        <b>{'activo' if prematch_on else 'inactivo'}</b>"
+        + (
+            f"  (drift h={settings.prematch_penalty_high_drift:.2f}/"
+            f"m={settings.prematch_penalty_medium_drift:.2f})"
+            if prematch_on else ""
+        )
+    )
+    if prematch_on and settings.prematch_reject_high_risk:
+        lines.append("  ⚠️ Rechazo prematch alto: <b>activo</b>")
     lines.append("")
 
     # ── Último sync ───────────────────────────────────────────────────────────
@@ -186,6 +211,36 @@ def _build_valor_text() -> str:
         for k, v in status_counts.items():
             if k not in _STATUS_LABELS and k != _VE_SKIPPED:
                 lines.append(f"  {k}: <b>{v}</b>")
+
+        # Prematch summary from DuckDB
+        if settings.prematch_intelligence_enabled:
+            try:
+                from app.data.local.duckdb_client import get_local_db
+                from app.data.local.prematch_repo import get_recent_alerts, prematch_counts
+                _dconn = get_local_db()
+                pm_counts = prematch_counts(_dconn)
+                pm_alerts = get_recent_alerts(_dconn, days=1)
+                high_alerts = [a for a in pm_alerts if a.get("severity") in ("high", "medium")]
+                drift_against = [
+                    a for a in pm_alerts
+                    if a.get("alert_type") == "odds_drift_against_pick"
+                ]
+                if pm_counts.get("prematch_odds_movement", 0) > 0:
+                    lines.append("")
+                    lines.append("  <b>Prematch Intelligence (DuckDB)</b>")
+                    lines.append(
+                        f"    Odds movement registradas: <b>{pm_counts['prematch_odds_movement']}</b>"
+                    )
+                    lines.append(
+                        f"    Alertas últimas 24h:       <b>{len(pm_alerts)}</b>"
+                        + (f"  ({len(high_alerts)} med/high)" if high_alerts else "")
+                    )
+                    if drift_against:
+                        lines.append(
+                            f"    Drift contra picks:        <b>{len(drift_against)}</b>"
+                        )
+            except Exception as exc:
+                logger.debug("/valor: prematch DuckDB error: %s", exc)
 
     except Exception as exc:
         logger.debug("/valor: error leyendo candidatos hoy: %s", exc)

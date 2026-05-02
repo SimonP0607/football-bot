@@ -1,6 +1,9 @@
 import logging
 from telegram import BotCommand, Update
-from telegram.ext import Application, ApplicationBuilder, CommandHandler, ContextTypes
+from telegram.ext import (
+    Application, ApplicationBuilder, CallbackQueryHandler,
+    CommandHandler, ContextTypes, MessageHandler, filters,
+)
 
 from app.core.logger import setup_logger
 from app.core.config import settings
@@ -13,6 +16,18 @@ from app.bot.handlers.debug_config import debug_config_handler
 from app.bot.handlers.partido import partido_handler
 from app.bot.handlers.ligas import ligas_handler
 from app.bot.handlers.valor import valor_handler
+from app.bot.handlers.resultados import resultados_handler
+from app.bot.handlers.rendimiento import rendimiento_handler
+from app.bot.handlers.equipo import equipo_handler, jugador_handler
+from app.bot.handlers.live import live_handler
+from app.bot.handlers.seguimiento import seguimiento_handler
+from app.bot.handlers.parlay import parlay_handler
+from app.bot.handlers.ayuda import ayuda_handler
+from app.bot.handlers.menu import menu_handler
+from app.bot.handlers.callbacks import callback_handler
+from app.bot.handlers.conversation import conversation_handler
+from app.bot.handlers.alertas import alertas_handler
+from app.bot.handlers.scheduler import scheduler_handler
 
 logger = logging.getLogger(__name__)
 
@@ -24,7 +39,18 @@ _BOT_COMMANDS = [
     BotCommand("partido", "Análisis de un partido concreto"),
     BotCommand("ligas", "Ligas activas y su cobertura"),
     BotCommand("valor", "Métricas del value engine (último sync)"),
+    BotCommand("resultados", "Últimos picks resueltos (win/loss/void)"),
+    BotCommand("rendimiento", "ROI, hit rate y yield del sistema"),
     BotCommand("estado", "Estado del sistema (Telegram, DB, API, datos)"),
+    BotCommand("equipo", "Buscar equipo en el catálogo (nombre o ID)"),
+    BotCommand("jugador", "Buscar jugador en el catálogo"),
+    BotCommand("live", "Picks en juego ahora (estado live)"),
+    BotCommand("seguimiento", "Seguimiento de un partido concreto"),
+    BotCommand("parlay", "Parlays recomendados del día (combinadas)"),
+    BotCommand("menu", "Menú interactivo con botones"),
+    BotCommand("ayuda", "Ayuda completa y guía de uso"),
+    BotCommand("alertas", "Alertas proactivas y estado del scheduler"),
+    BotCommand("scheduler", "Control del scheduler (admin)"),
     BotCommand("id", "Ver tu Telegram user ID (setup inicial)"),
 ]
 
@@ -49,6 +75,10 @@ async def _post_init(application: Application) -> None:
         logger.warning("═" * 65)
     else:
         logger.info("Propietario configurado: user_id=%s", settings.telegram_allowed_user_id)
+
+    # ── Scheduler setup ────────────────────────────────────────────────────────
+    from app.services.scheduler_service import setup_scheduler
+    setup_scheduler(application)
 
     # ── Database schema check ──────────────────────────────────────────────────
     from app.data.db_health import check_schema
@@ -108,6 +138,17 @@ def build_app() -> Application:
     application.add_handler(CommandHandler("partido", partido_handler))
     application.add_handler(CommandHandler("ligas", ligas_handler))
     application.add_handler(CommandHandler("valor", valor_handler))
+    application.add_handler(CommandHandler("resultados", resultados_handler))
+    application.add_handler(CommandHandler("rendimiento", rendimiento_handler))
+    application.add_handler(CommandHandler("equipo", equipo_handler))
+    application.add_handler(CommandHandler("jugador", jugador_handler))
+    application.add_handler(CommandHandler("live", live_handler))
+    application.add_handler(CommandHandler("seguimiento", seguimiento_handler))
+    application.add_handler(CommandHandler("parlay", parlay_handler))
+    application.add_handler(CommandHandler("ayuda", ayuda_handler))
+    application.add_handler(CommandHandler("menu", menu_handler))
+    application.add_handler(CommandHandler("alertas", alertas_handler))
+    application.add_handler(CommandHandler("scheduler", scheduler_handler))
     application.add_handler(CommandHandler("estado", estado_handler))
     application.add_handler(CommandHandler("id", id_handler))
 
@@ -115,6 +156,13 @@ def build_app() -> Application:
     if settings.is_local:
         application.add_handler(CommandHandler("debug_config", debug_config_handler))
         logger.debug("/debug_config registrado (solo disponible en modo local)")
+
+    # CallbackQueryHandler for inline keyboard buttons
+    application.add_handler(CallbackQueryHandler(callback_handler))
+
+    # MessageHandler for free-text (conversational AI router)
+    # Must be added LAST so command handlers take priority
+    application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, conversation_handler))
 
     application.add_error_handler(_error_handler)
 

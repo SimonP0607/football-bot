@@ -46,6 +46,39 @@ EXPECTED_TABLES = [
     "calibration_registry",
     "market_quality_summary",
     "shadow_value_picks",
+    # 004_entity_catalog_schema.sql
+    "team_identity",
+    "team_season_membership",
+    "player_identity",
+    "squad_membership",
+    "entity_sync_runs",
+    # 005_availability_schema.sql
+    "fixture_injuries_history",
+    "fixture_lineups_history",
+    "player_availability_signals",
+    "team_availability_summary",
+    # 006_prematch_intelligence_schema.sql
+    "prematch_odds_movement",
+    "prematch_fixture_alerts",
+    "prematch_lineup_status",
+    # 007_live_monitor_schema.sql
+    "live_fixture_snapshots",
+    "live_fixture_events",
+    "live_pick_tracking",
+    "live_notifications_log",
+    # 008_parlay_engine_schema.sql
+    "parlay_candidates",
+    "parlay_legs",
+    "parlay_results",
+    "parlay_risk_rules",
+    # 009_ai_router_schema.sql
+    "ai_router_logs",
+    "ai_user_context",
+    "ai_intent_examples",
+    # 010_scheduler_schema.sql
+    "scheduler_runs",
+    "scheduler_notifications",
+    "scheduler_state",
 ]
 
 
