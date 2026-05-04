@@ -307,6 +307,37 @@ class Settings:
     scheduler_notify_alerts: bool = (
         os.getenv("SCHEDULER_NOTIFY_ALERTS", "true").strip().lower() == "true"
     )
+    # Phase 11: Player Intelligence scheduler settings
+    scheduler_player_stats_enabled: bool = (
+        os.getenv("SCHEDULER_PLAYER_STATS_ENABLED", "false").strip().lower() == "true"
+    )
+    scheduler_player_stats_time: str = os.getenv("SCHEDULER_PLAYER_STATS_TIME", "23:30").strip()
+    scheduler_player_stats_lookback_days: int = _int("SCHEDULER_PLAYER_STATS_LOOKBACK_DAYS", 2)
+    scheduler_player_signals_enabled: bool = (
+        os.getenv("SCHEDULER_PLAYER_SIGNALS_ENABLED", "true").strip().lower() == "true"
+    )
+
+    # ── Phase 12: Market Intelligence, Odds History & CLV Engine ─────────────
+    market_intelligence_enabled: bool = (
+        os.getenv("MARKET_INTELLIGENCE_ENABLED", "false").strip().lower() == "true"
+    )
+    market_intelligence_use_live_odds: bool = (
+        os.getenv("MARKET_INTELLIGENCE_USE_LIVE_ODDS", "false").strip().lower() == "true"
+    )
+    market_intelligence_min_movement: float = _float("MARKET_INTELLIGENCE_MIN_MOVEMENT", 0.025)
+    market_intelligence_clv_neutral_band: float = _float("MARKET_INTELLIGENCE_CLV_NEUTRAL_BAND", 0.005)
+    market_intelligence_default_bookmaker_priority: str = os.getenv(
+        "MARKET_INTELLIGENCE_DEFAULT_BOOKMAKER_PRIORITY", "8,6,11,1"
+    ).strip()
+    market_intelligence_max_requests_per_run: int = _int("MARKET_INTELLIGENCE_MAX_REQUESTS_PER_RUN", 500)
+    # Scheduler jobs for market intelligence
+    scheduler_market_enabled: bool = (
+        os.getenv("SCHEDULER_MARKET_ENABLED", "false").strip().lower() == "true"
+    )
+    scheduler_market_opening_time: str = os.getenv("SCHEDULER_MARKET_OPENING_TIME", "08:00").strip()
+    scheduler_market_prematch_hours: int = _int("SCHEDULER_MARKET_PREMATCH_HOURS", 6)
+    scheduler_market_closing_minutes: int = _int("SCHEDULER_MARKET_CLOSING_MINUTES", 15)
+    scheduler_clv_time: str = os.getenv("SCHEDULER_CLV_TIME", "23:45").strip()
 
     # ── Política de ingestión histórica (Phase 3) ─────────────────────────────
     # Máximo de temporadas cerradas a conservar por liga en DuckDB.

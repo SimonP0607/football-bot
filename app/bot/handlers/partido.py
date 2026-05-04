@@ -120,12 +120,44 @@ async def partido_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         except Exception as _live_exc:
             logger.debug("/partido: live state lookup failed — %s", _live_exc)
 
+        # Phase 11: load key players from DuckDB (best-effort)
+        player_overview = None
+        try:
+            from app.data.local.duckdb_client import get_local_db
+            from app.services.player_intelligence_service import get_fixture_player_overview
+            _dconn = get_local_db()
+            if provider_fid:
+                player_overview = get_fixture_player_overview(_dconn, provider_fid, top_n=3)
+        except Exception as _pi_exc:
+            logger.debug("/partido: player_overview failed — %s", _pi_exc)
+
+        # Phase 12: load market intelligence from DuckDB (best-effort)
+        market_summary = None
+        try:
+            from app.core.config import settings as _s
+            if _s.market_intelligence_enabled:
+                from app.data.local.duckdb_client import get_local_db
+                from app.services.market_intelligence_service import get_fixture_market_summary
+                _dconn = get_local_db()
+                if provider_fid:
+                    market_summary = get_fixture_market_summary(_dconn, provider_fid)
+        except Exception as _mi_exc:
+            logger.debug("/partido: market_intelligence failed — %s", _mi_exc)
+
         text = format_partido(
             fixture, candidates, team_names, league_names,
             availability=availability,
             prematch=prematch,
             live_state=live_state,
         )
+
+        # Append player overview if available
+        if player_overview:
+            text += _format_player_overview(player_overview)
+
+        # Append market intelligence if available
+        if market_summary:
+            text += _format_market_summary(market_summary)
     except Exception as exc:
         logger.error("/partido: error analizando fixture_id=%s — %s", fixture["id"], exc, exc_info=True)
         await update.message.reply_text(
@@ -134,6 +166,64 @@ async def partido_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
 
     await send_html(update.message, text)
+
+
+def _format_player_overview(by_team: dict) -> str:
+    """Format top players per team as HTML append to /partido."""
+    import html
+    if not by_team:
+        return ""
+    lines = ["\n\n─" * 14, "<b>Jugadores clave</b>"]
+    for tid, players in list(by_team.items())[:2]:
+        for p in players[:3]:
+            name = html.escape(str(p.get("player_name") or ""))
+            pos = html.escape(str(p.get("position") or ""))
+            g = p.get("goals_total", 0)
+            a = p.get("assists", 0)
+            trend = p.get("trend")
+            from app.bot.handlers.jugador_stats import _TREND_ICON
+            icon = _TREND_ICON.get(trend, "") if trend else ""
+            stat = f"{g}G/{a}A" if (g or a) else ""
+            stat_str = f" — {stat}" if stat else ""
+            lines.append(f"  {icon} {name} ({pos}){stat_str}")
+    lines.append("<i>Usa /jugadorstats &lt;nombre&gt; para análisis detallado</i>")
+    return "\n".join(lines)
+
+
+def _format_market_summary(summary: dict) -> str:
+    """Format Phase 12 market intelligence as HTML append to /partido."""
+    import html as _html
+    if not summary:
+        return ""
+    lines = ["\n\n─" * 14, "<b>📈 Mercado</b>"]
+
+    closing_lines = summary.get("closing_lines", [])
+    for cl in closing_lines[:6]:
+        mk = _html.escape(cl.get("market_key", ""))
+        sel = _html.escape(cl.get("selection", ""))
+        open_o = cl.get("opening_odds")
+        close_o = cl.get("closing_odds")
+        label = cl.get("movement_label", "no_data")
+        if label == "steam_towards_selection":
+            icon = "🔥"
+        elif label == "drift_against_selection":
+            icon = "📉"
+        else:
+            icon = "➡️"
+        open_str = f"{open_o:.2f}" if open_o else "?"
+        close_str = f"{close_o:.2f}" if close_o else "?"
+        lines.append(f"  {icon} {mk} · {sel}: {open_str} → {close_str}")
+
+    flags = []
+    if summary.get("has_steam"):
+        flags.append("🔥Steam")
+    if summary.get("has_reverse_line"):
+        flags.append("↩️Reverse")
+    if flags:
+        lines.append("  ⚠ " + " · ".join(flags))
+
+    lines.append("<i>Usa /mercado para análisis completo</i>")
+    return "\n".join(lines)
 
 
 def _resolve_fixture(query: str) -> dict | list | None:

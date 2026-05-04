@@ -708,6 +708,368 @@ async def fetch_players_by_team_season(
     return players, total_pages
 
 
+# ── Phase 11: Player Intelligence ────────────────────────────────────────────
+
+
+async def fetch_fixture_player_stats(provider_fixture_id: int) -> list[dict]:
+    """Return per-player stats for a fixture from /fixtures/players.
+
+    Each item includes player identity, team, and full statistical breakdown.
+    Returns list of raw team blocks; parse with _parse_fixture_player_block().
+    """
+    data = await api_client.get(
+        "/fixtures/players", params={"fixture": provider_fixture_id}
+    )
+    items: list[dict] = data.get("response", [])
+    logger.debug(
+        "fetch_fixture_player_stats fixture=%s → %d team blocks",
+        provider_fixture_id, len(items),
+    )
+    return items
+
+
+def parse_fixture_player_stats(
+    raw_blocks: list[dict],
+    provider_fixture_id: int,
+    fixture_id: int | None = None,
+    league_id: int | None = None,
+    season: int | None = None,
+) -> list[dict]:
+    """Flatten /fixtures/players response into individual player rows.
+
+    Each returned dict maps directly to the player_fixture_stats table.
+    """
+    rows: list[dict] = []
+    for block in raw_blocks:
+        team = block.get("team", {})
+        team_id = team.get("id")
+        team_name = team.get("name", "")
+        for entry in block.get("players", []):
+            p = entry.get("player", {})
+            stats_list = entry.get("statistics", [])
+            s = stats_list[0] if stats_list else {}
+
+            player_id = p.get("id")
+            if not player_id:
+                continue
+
+            games = s.get("games", {})
+            shots = s.get("shots", {})
+            goals = s.get("goals", {})
+            passes = s.get("passes", {})
+            tackles = s.get("tackles", {})
+            duels = s.get("duels", {})
+            dribbles = s.get("dribbles", {})
+            fouls = s.get("fouls", {})
+            cards = s.get("cards", {})
+            penalty = s.get("penalty", {})
+
+            def _i(val) -> int:
+                try:
+                    return int(val) if val is not None else 0
+                except (TypeError, ValueError):
+                    return 0
+
+            def _f(val) -> float | None:
+                try:
+                    return float(val) if val is not None else None
+                except (TypeError, ValueError):
+                    return None
+
+            import json as _json
+            rows.append({
+                "provider_fixture_id": provider_fixture_id,
+                "fixture_id": fixture_id,
+                "league_id": league_id,
+                "season": season,
+                "team_id": team_id,
+                "player_id": player_id,
+                "player_name": p.get("name", ""),
+                "team_name": team_name,
+                "position": games.get("position"),
+                "minutes": _i(games.get("minutes")),
+                "rating": _f(games.get("rating")),
+                "captain": bool(games.get("captain", False)),
+                "substitute": bool(games.get("substitute", False)),
+                "offsides": _i(s.get("offsides")),
+                "shots_total": _i(shots.get("total")),
+                "shots_on": _i(shots.get("on")),
+                "goals_total": _i(goals.get("total")),
+                "goals_conceded": _i(goals.get("conceded")),
+                "assists": _i(goals.get("assists")),
+                "saves": _i(goals.get("saves")),
+                "passes_total": _i(passes.get("total")),
+                "passes_key": _i(passes.get("key")),
+                "passes_accuracy": _f(passes.get("accuracy")),
+                "tackles_total": _i(tackles.get("total")),
+                "tackles_blocks": _i(tackles.get("blocks")),
+                "tackles_interceptions": _i(tackles.get("interceptions")),
+                "duels_total": _i(duels.get("total")),
+                "duels_won": _i(duels.get("won")),
+                "dribbles_attempts": _i(dribbles.get("attempts")),
+                "dribbles_success": _i(dribbles.get("success")),
+                "fouls_drawn": _i(fouls.get("drawn")),
+                "fouls_committed": _i(fouls.get("committed")),
+                "cards_yellow": _i(cards.get("yellow")),
+                "cards_red": _i(cards.get("red")),
+                "penalty_won": _i(penalty.get("won")),
+                "penalty_committed": _i(penalty.get("committed")),
+                "penalty_scored": _i(penalty.get("scored")),
+                "penalty_missed": _i(penalty.get("missed")),
+                "penalty_saved": _i(penalty.get("saved")),
+                "raw_json": _json.dumps(entry),
+            })
+    return rows
+
+
+async def fetch_players_by_league_season(
+    league_id: int,
+    season: int,
+    page: int = 1,
+) -> tuple[list[dict], int]:
+    """Return players for a league/season from /players (paginated).
+
+    Returns (players_list, total_pages). Each player has identity + season stats.
+    Budget-heavy: use sparingly, max 1 page at a time.
+    """
+    data = await api_client.get(
+        "/players", params={"league": league_id, "season": season, "page": page}
+    )
+    paging = data.get("paging", {})
+    total_pages: int = max(paging.get("total", 1), 1)
+    items: list[dict] = data.get("response", [])
+    players = []
+    for item in items:
+        p = item.get("player", {})
+        pid = p.get("id")
+        if not pid:
+            continue
+        players.append({
+            "provider_player_id": pid,
+            "name": p.get("name", ""),
+            "age": p.get("age"),
+            "nationality": p.get("nationality"),
+            "statistics": item.get("statistics", []),
+        })
+    logger.debug(
+        "fetch_players_by_league_season league=%s season=%s page=%s/%s → %d",
+        league_id, season, page, total_pages, len(players),
+    )
+    return players, total_pages
+
+
+async def fetch_player_statistics(
+    player_id: int,
+    season: int | None = None,
+    league_id: int | None = None,
+) -> dict | None:
+    """Return statistics for a single player from /players.
+
+    Returns dict with player identity + statistics list, or None if not found.
+    """
+    params: dict = {"id": player_id}
+    if season:
+        params["season"] = season
+    if league_id:
+        params["league"] = league_id
+    data = await api_client.get("/players", params=params)
+    items = data.get("response", [])
+    if not items:
+        return None
+    return items[0]  # {player: {...}, statistics: [...]}
+
+
+async def fetch_top_scorers(league_id: int, season: int) -> list[dict]:
+    """Return top scorers for a league/season from /players/topscorers."""
+    data = await api_client.get(
+        "/players/topscorers", params={"league": league_id, "season": season}
+    )
+    items = data.get("response", [])
+    result = []
+    for item in items:
+        p = item.get("player", {})
+        stats = item.get("statistics", [{}])[0]
+        goals = stats.get("goals", {})
+        result.append({
+            "player_id": p.get("id"),
+            "player_name": p.get("name", ""),
+            "team_id": stats.get("team", {}).get("id"),
+            "team_name": stats.get("team", {}).get("name", ""),
+            "goals": goals.get("total", 0) or 0,
+            "assists": goals.get("assists", 0) or 0,
+            "appearances": stats.get("games", {}).get("appearences", 0) or 0,
+        })
+    logger.debug("fetch_top_scorers league=%s season=%s → %d", league_id, season, len(result))
+    return result
+
+
+async def fetch_top_assists(league_id: int, season: int) -> list[dict]:
+    """Return top assist providers for a league/season from /players/topassists."""
+    data = await api_client.get(
+        "/players/topassists", params={"league": league_id, "season": season}
+    )
+    items = data.get("response", [])
+    result = []
+    for item in items:
+        p = item.get("player", {})
+        stats = item.get("statistics", [{}])[0]
+        goals = stats.get("goals", {})
+        result.append({
+            "player_id": p.get("id"),
+            "player_name": p.get("name", ""),
+            "team_id": stats.get("team", {}).get("id"),
+            "team_name": stats.get("team", {}).get("name", ""),
+            "assists": goals.get("assists", 0) or 0,
+            "goals": goals.get("total", 0) or 0,
+            "appearances": stats.get("games", {}).get("appearences", 0) or 0,
+        })
+    logger.debug("fetch_top_assists league=%s season=%s → %d", league_id, season, len(result))
+    return result
+
+
+async def fetch_top_cards(league_id: int, season: int) -> list[dict]:
+    """Return most-booked players for a league/season from /players/topyellowcards."""
+    data = await api_client.get(
+        "/players/topyellowcards", params={"league": league_id, "season": season}
+    )
+    items = data.get("response", [])
+    result = []
+    for item in items:
+        p = item.get("player", {})
+        stats = item.get("statistics", [{}])[0]
+        cards = stats.get("cards", {})
+        result.append({
+            "player_id": p.get("id"),
+            "player_name": p.get("name", ""),
+            "team_id": stats.get("team", {}).get("id"),
+            "team_name": stats.get("team", {}).get("name", ""),
+            "yellow_cards": cards.get("yellow", 0) or 0,
+            "red_cards": cards.get("red", 0) or 0,
+            "appearances": stats.get("games", {}).get("appearences", 0) or 0,
+        })
+    logger.debug("fetch_top_cards league=%s season=%s → %d", league_id, season, len(result))
+    return result
+
+
+async def fetch_top_saves(league_id: int, season: int) -> list[dict]:
+    """Return goalkeepers by saves for a league/season from /players/topredcards.
+
+    NOTE: API-Football does not have a /players/topsaves endpoint.
+    This queries /players/topsaves and gracefully returns [] if unavailable.
+    """
+    try:
+        data = await api_client.get(
+            "/players/topsaves", params={"league": league_id, "season": season}
+        )
+        items = data.get("response", [])
+        result = []
+        for item in items:
+            p = item.get("player", {})
+            stats = item.get("statistics", [{}])[0]
+            goals = stats.get("goals", {})
+            result.append({
+                "player_id": p.get("id"),
+                "player_name": p.get("name", ""),
+                "team_id": stats.get("team", {}).get("id"),
+                "team_name": stats.get("team", {}).get("name", ""),
+                "saves": goals.get("saves", 0) or 0,
+                "appearances": stats.get("games", {}).get("appearences", 0) or 0,
+            })
+        logger.debug("fetch_top_saves league=%s season=%s → %d", league_id, season, len(result))
+        return result
+    except Exception as exc:
+        logger.debug("fetch_top_saves not available: %s", exc)
+        return []
+
+
+# ── Phase 12: Market Intelligence — Odds endpoints ───────────────────────────
+
+
+async def fetch_odds_by_fixture(
+    fixture_id: int,
+    bookmaker: int | None = None,
+    bet: int | None = None,
+) -> list[dict]:
+    """Return raw paginated odds from /odds for a specific fixture.
+
+    Returns the full structured response items for market intelligence snapshot
+    storage. Each item: {fixture, league, bookmakers: [{id, name, bets: [...]}]}
+    """
+    params: dict = {"fixture": fixture_id}
+    if bookmaker:
+        params["bookmaker"] = bookmaker
+    if bet:
+        params["bet"] = bet
+
+    rows: list[dict] = []
+    async for page_items in api_client.get_paginated("/odds", params):
+        rows.extend(page_items)
+
+    logger.debug("fetch_odds_by_fixture fixture=%s → %d items", fixture_id, len(rows))
+    return rows
+
+
+async def fetch_odds_by_league_date(
+    league_id: int,
+    season: int,
+    date: str,
+    bookmaker: int | None = None,
+    bet: int | None = None,
+) -> list[dict]:
+    """Return raw odds from /odds for all fixtures in a league on a given date."""
+    params: dict = {"league": league_id, "season": season, "date": date}
+    if bookmaker:
+        params["bookmaker"] = bookmaker
+    if bet:
+        params["bet"] = bet
+
+    rows: list[dict] = []
+    async for page_items in api_client.get_paginated("/odds", params):
+        rows.extend(page_items)
+
+    logger.debug(
+        "fetch_odds_by_league_date league=%s season=%s date=%s → %d items",
+        league_id, season, date, len(rows),
+    )
+    return rows
+
+
+async def fetch_live_odds_by_fixture(
+    fixture_id: int,
+    bookmaker: int | None = None,
+    bet: int | None = None,
+) -> list[dict]:
+    """Return live odds from /odds/live for a specific fixture."""
+    params: dict = {"fixture": fixture_id}
+    if bookmaker:
+        params["bookmaker"] = bookmaker
+    if bet:
+        params["bet"] = bet
+
+    data = await api_client.get("/odds/live", params=params)
+    items: list[dict] = data.get("response", [])
+    logger.debug("fetch_live_odds_by_fixture fixture=%s → %d items", fixture_id, len(items))
+    return items
+
+
+async def fetch_odds_bookmakers() -> list[dict]:
+    """Return all bookmakers from /odds/bookmakers."""
+    return await fetch_bookmakers()
+
+
+async def fetch_odds_bets() -> list[dict]:
+    """Return all prematch bet types from /odds/bets."""
+    return await fetch_bet_types()
+
+
+async def fetch_live_odds_bets() -> list[dict]:
+    """Return all live bet types from /odds/live/bets."""
+    data = await api_client.get("/odds/live/bets")
+    items: list[dict] = data.get("response", [])
+    logger.info("Live bet types recibidos: %d", len(items))
+    return items
+
+
 async def fetch_player_by_id(player_id: int, season: int | None = None) -> dict | None:
     """Return identity info for a single player from /players.
 

@@ -113,6 +113,24 @@ async def equipo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         except Exception:
             pass
 
+        # Phase 11: top players from player_intelligence (best-effort)
+        try:
+            from app.data.local.player_intelligence_repo import get_team_player_profiles
+            top_players = get_team_player_profiles(conn, tid, limit=5)
+            if top_players:
+                lines.append("  <b>Top jugadores (estadísticas):</b>")
+                for p in top_players[:4]:
+                    pname = _esc(p.get("player_name") or "")
+                    pos = _esc(p.get("position") or "")
+                    g = p.get("goals", 0) or 0
+                    a = p.get("assists", 0) or 0
+                    lines.append(f"    · {pname} ({pos}) — {g}G / {a}A")
+                lines.append("  <i>Usa /jugadorstats &lt;nombre&gt; para más detalle</i>")
+            else:
+                lines.append("  <i>Sin estadísticas profundas cargadas aún</i>")
+        except Exception:
+            lines.append("  <i>Sin estadísticas profundas cargadas aún</i>")
+
         lines.append("")
 
     if len(teams) > 3:

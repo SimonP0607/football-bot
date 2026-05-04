@@ -79,6 +79,16 @@ EXPECTED_TABLES = [
     "scheduler_runs",
     "scheduler_notifications",
     "scheduler_state",
+    # 011_player_intelligence_schema.sql
+    "player_fixture_stats",
+    "player_season_profiles",
+    "player_recent_form",
+    "player_prop_signals",
+    # 012_market_intelligence_schema.sql
+    "market_odds_history",
+    "market_closing_lines",
+    "pick_clv_results",
+    "market_movement_signals",
 ]
 
 

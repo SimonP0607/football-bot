@@ -24,6 +24,10 @@ _VALID_INTENTS = {
     "player_lookup", "league_list", "system_status", "value_metrics",
     "results", "performance", "parlay", "parlay_risk", "live",
     "follow_fixture", "help", "unknown",
+    # Phase 11: Player Intelligence
+    "player_stats", "player_props", "hot_players", "team_players", "player_form",
+    # Phase 12: Market Intelligence
+    "market_summary", "fixture_market", "clv_summary", "odds_movement", "bookmaker_coverage",
 }
 
 _EMPTY_ARGS = {
@@ -118,11 +122,19 @@ def _extract_team_query(text: str) -> str | None:
 
 def _extract_player_query(text: str) -> str | None:
     """Extract player name following trigger words."""
-    m = re.search(
-        r"jugador\s+([A-Za-záéíóúÁÉÍÓÚñÑüÜ\s\-\.]+)", text, re.IGNORECASE
-    )
-    if m:
-        return m.group(1).strip().rstrip(",.?!")
+    patterns = [
+        r"jugador\s+([A-Za-záéíóúÁÉÍÓÚñÑüÜ\s\-\.]+)",
+        r"cómo\s+(?:viene|está|juega)\s+([A-Za-záéíóúÁÉÍÓÚñÑüÜ\s\-\.]+?)(?:\s+en\s|$|\?)",
+        r"como\s+(?:viene|esta|juega)\s+([A-Za-záéíóúÁÉÍÓÚñÑüÜ\s\-\.]+?)(?:\s+en\s|$|\?)",
+        r"stats?\s+(?:de\s+)?([A-Za-záéíóúÁÉÍÓÚñÑüÜ\s\-\.]+)",
+        r"forma\s+(?:de\s+)?([A-Za-záéíóúÁÉÍÓÚñÑüÜ\s\-\.]+)",
+    ]
+    for pat in patterns:
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            name = m.group(1).strip().rstrip(",.?!")
+            if name and len(name) > 2:
+                return name
     return None
 
 
@@ -207,6 +219,34 @@ def classify_with_rules(text: str, user_context: dict | None = None) -> dict:
                                "ver", "lista"):
         return _make_result("league_list", 0.90)
 
+    # ── Phase 12: Market Intelligence (before fixture_analysis to avoid "partido" collision) ──
+
+    # clv_summary: CLV performance report
+    if _has(t, "clv", "closing line value", "línea de cierre", "linea de cierre"):
+        days = _extract_days(t)
+        return _make_result("clv_summary", 0.95, args={"days": days})
+
+    # fixture_market: market data for a specific fixture
+    if _has(t, "mercado", "cuotas", "momios", "odds") and _extract_number(t):
+        fid = _extract_number(t)
+        return _make_result("fixture_market", 0.92, args={"fixture_id": fid})
+
+    # odds_movement: steam, drift, reverse line
+    if _has(t, "steam", "drift", "reverse line", "movimiento de cuotas",
+             "movimiento de momios", "sharps", "sharp money",
+             "cuotas bajaron", "cuotas subieron", "momios bajaron", "momios subieron"):
+        fid = _extract_number(t)
+        return _make_result("odds_movement", 0.90, args={"fixture_id": fid})
+
+    # market_summary: general market overview
+    if _has(t, "mercado", "inteligencia de mercado") and not _extract_number(t):
+        return _make_result("market_summary", 0.85)
+
+    # bookmaker_coverage: which bookmakers
+    if _has(t, "bookmaker", "casa de apuestas", "casas de apuestas", "bet365",
+             "pinnacle", "betfair", "1xbet", "cobertura de casas"):
+        return _make_result("bookmaker_coverage", 0.88)
+
     # ── Fixture / Team analysis ────────────────────────────────────────────────
     if _has(t, "analiza", "análisis", "analisis") or (
         _has(t, "partido", "fixture", "match") and not _has(t, "en vivo", "live")
@@ -225,6 +265,45 @@ def classify_with_rules(text: str, user_context: dict | None = None) -> dict:
     if _has(t, "equipo", "club", "team"):
         team = _extract_team_query(t) or text.strip()
         return _make_result("team_lookup", 0.88, args={"team_query": team})
+
+    # ── Phase 11: Player Intelligence intents ─────────────────────────────────
+
+    # player_props: signals for a match ("can score", "shots", "cards today")
+    if _has(t, "prop", "señal", "señales") and _has(t, "jugador", "player", "partido", "fixture"):
+        fid = _extract_number(t)
+        team = _extract_team_query(t)
+        return _make_result("player_props", 0.90, args={"fixture_id": fid, "team_query": team})
+    if _has(t, "puede anotar", "puede meter", "puede rematar", "tiros hoy",
+             "tarjetas probable", "jugadores clave") and _has(t, "partido", "hoy", "jugado"):
+        fid = _extract_number(t)
+        return _make_result("player_props", 0.87, args={"fixture_id": fid})
+
+    # hot_players: trend / in-form players
+    if _has(t, "caliente", "en racha", "en forma", "jugadores calientes",
+             "playerhot", "hot player", "mejor forma", "mejor tendencia"):
+        league_id = _extract_number(t)
+        return _make_result("hot_players", 0.92, args={"fixture_id": league_id})
+
+    # player_form: recent form for a specific player
+    if _has(t, "forma reciente", "últimos partidos de", "tendencia de",
+             "cómo ha jugado", "como ha jugado", "rendimiento de"):
+        player = _extract_player_query(text) or text.strip()
+        return _make_result("player_form", 0.90, args={"player_query": player})
+
+    # player_stats: full stats profile for a player
+    if _has(t, "cómo viene", "como viene", "cómo está", "como esta") and len(t) > 10:
+        player = _extract_player_query(text)
+        if player:
+            return _make_result("player_stats", 0.92, args={"player_query": player})
+    if _has(t, "estadísticas de", "estadisticas de", "stats de") and not _has(t, "equipo", "liga"):
+        player = _extract_player_query(text) or text.strip()
+        return _make_result("player_stats", 0.88, args={"player_query": player})
+
+    # team_players: players for a team
+    if _has(t, "jugadores de", "plantilla de", "quiénes son", "quienes son") and \
+            _has(t, "jugador", "jugadores", "plantilla", "equipo"):
+        team = _extract_team_query(text)
+        return _make_result("team_players", 0.88, args={"team_query": team})
 
     # ── Player lookup ──────────────────────────────────────────────────────────
     if _has(t, "jugador", "player", "futbolista"):

@@ -29,6 +29,11 @@ Pronósticos basados en modelo estadístico Poisson + Elo + Value Engine calibra
 /parlay — parlays recomendados del día (combinadas)
 /equipo &lt;nombre o id&gt; — buscar equipo en el catálogo
 /jugador &lt;nombre&gt; — buscar jugador en el catálogo
+/jugadorstats &lt;nombre&gt; — estadísticas y forma reciente de un jugador
+/props &lt;fixture_id&gt; — señales de jugadores para un partido
+/playerhot — jugadores en mejor forma reciente
+/mercado &lt;fixture_id&gt; — closing lines y señales de movimiento de cuotas
+/clv [días] — reporte de Closing Line Value de los picks
 /alertas — alertas proactivas y estado del scheduler
 /menu — menú con botones interactivos
 /ayuda — ayuda completa y guía de uso

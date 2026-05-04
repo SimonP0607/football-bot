@@ -201,6 +201,312 @@ async def settlement_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         log_scheduler_run(conn, job_key, "error", start, datetime.now(timezone.utc), error_message=str(exc))
 
 
+async def player_stats_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Nightly sync of player stats for recent finished fixtures."""
+    job_key = "player_stats"
+    start = datetime.now(timezone.utc)
+    conn = _conn()
+    app = _application(context)
+
+    from app.services.scheduler_service import log_scheduler_run, update_scheduler_state, send_admin_notification
+
+    api_calls = 0
+    rows_written = 0
+    try:
+        if not settings.scheduler_player_stats_enabled:
+            return
+
+        if not _budget_ok(job_key):
+            log_scheduler_run(conn, job_key, "skipped_budget", start, datetime.now(timezone.utc))
+            return
+
+        logger.info("[scheduler] %s: iniciando sync de estadísticas de jugadores", job_key)
+
+        try:
+            from app.services.player_intelligence_service import sync_player_stats_bulk
+            result = await sync_player_stats_bulk(
+                conn,
+                date=None,
+                league_id=None,
+                limit=30,
+                max_requests=settings.scheduler_player_stats_lookback_days * 15,
+                dry_run=False,
+            )
+            api_calls = result.get("api_calls", 0)
+            rows_written = result.get("rows_written", 0)
+        except (ImportError, AttributeError) as exc:
+            logger.debug("[scheduler] %s: player_intelligence_service no disponible: %s", job_key, exc)
+
+        if settings.scheduler_player_signals_enabled:
+            try:
+                from app.services.player_intelligence_service import (
+                    build_all_recent_forms,
+                    generate_player_signals,
+                )
+                build_all_recent_forms(conn, windows=[3, 5, 10], dry_run=False)
+                generate_player_signals(conn, dry_run=False)
+            except (ImportError, AttributeError) as exc:
+                logger.debug("[scheduler] %s: generación de señales no disponible: %s", job_key, exc)
+
+        end = datetime.now(timezone.utc)
+        update_scheduler_state(conn, "last_player_stats", end.isoformat())
+        log_scheduler_run(
+            conn, job_key, "completed", start, end,
+            api_calls_used=api_calls,
+            metadata={"rows_written": rows_written},
+        )
+        logger.info("[scheduler] %s: %d filas en %.1fs", job_key, rows_written, (end - start).total_seconds())
+
+        if settings.scheduler_notify_alerts and app and rows_written > 0:
+            await send_admin_notification(
+                app,
+                f"✅ <b>Player stats sync</b> completado — {rows_written} filas",
+            )
+
+    except Exception as exc:
+        logger.error("[scheduler] %s: ERROR — %s", job_key, exc, exc_info=True)
+        log_scheduler_run(conn, job_key, "error", start, datetime.now(timezone.utc), error_message=str(exc))
+        if app:
+            try:
+                await send_admin_notification(app, f"❌ <b>Player stats</b> error: {exc}")
+            except Exception:
+                pass
+
+
+async def market_opening_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Fetch opening odds for today's upcoming fixtures."""
+    job_key = "market_opening"
+    start = datetime.now(timezone.utc)
+    conn = _conn()
+
+    from app.services.scheduler_service import log_scheduler_run, update_scheduler_state
+
+    api_calls = 0
+    rows_written = 0
+    try:
+        if not _budget_ok(job_key):
+            log_scheduler_run(conn, job_key, "skipped_budget", start, datetime.now(timezone.utc))
+            return
+
+        logger.info("[scheduler] %s: capturando odds de apertura", job_key)
+
+        try:
+            from app.services.market_intelligence_service import sync_market_odds
+
+            # Get today's upcoming fixtures from local DB
+            today = start.strftime("%Y-%m-%d")
+            rows = conn.execute(
+                """
+                SELECT DISTINCT provider_fixture_id FROM fixtures
+                WHERE date = ? AND status_short NOT IN ('FT','AET','PEN','CANC','AWD','WO')
+                LIMIT ?
+                """,
+                [today, settings.market_intelligence_max_requests_per_run],
+            ).fetchall()
+            fixture_ids = [r[0] for r in rows if r[0]]
+
+            if fixture_ids:
+                result = await sync_market_odds(
+                    conn, fixture_ids, snapshot_type="opening", dry_run=False
+                )
+                api_calls = result.get("api_calls", 0)
+                rows_written = result.get("rows_written", 0)
+        except (ImportError, AttributeError, Exception) as exc:
+            logger.debug("[scheduler] %s: error — %s", job_key, exc)
+
+        end = datetime.now(timezone.utc)
+        update_scheduler_state(conn, "last_market_opening", end.isoformat())
+        log_scheduler_run(
+            conn, job_key, "completed", start, end,
+            api_calls_used=api_calls,
+            metadata={"rows_written": rows_written},
+        )
+        logger.info("[scheduler] %s: %d filas en %.1fs", job_key, rows_written, (end - start).total_seconds())
+
+    except Exception as exc:
+        logger.error("[scheduler] %s: ERROR — %s", job_key, exc)
+        log_scheduler_run(conn, job_key, "error", start, datetime.now(timezone.utc), error_message=str(exc))
+
+
+async def market_prematch_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Fetch prematch odds for fixtures kicking off within the configured window."""
+    job_key = "market_prematch"
+    start = datetime.now(timezone.utc)
+    conn = _conn()
+    hours = settings.scheduler_market_prematch_hours
+
+    from app.services.scheduler_service import log_scheduler_run, update_scheduler_state
+
+    api_calls = 0
+    rows_written = 0
+    try:
+        if not _budget_ok(job_key):
+            log_scheduler_run(conn, job_key, "skipped_budget", start, datetime.now(timezone.utc))
+            return
+
+        logger.info("[scheduler] %s: ventana=%dh", job_key, hours)
+
+        try:
+            from app.services.market_intelligence_service import sync_market_odds
+            from datetime import timedelta
+
+            cutoff = (start + timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
+            rows = conn.execute(
+                """
+                SELECT DISTINCT provider_fixture_id FROM fixtures
+                WHERE date <= ? AND status_short NOT IN ('FT','AET','PEN','CANC','AWD','WO')
+                LIMIT ?
+                """,
+                [cutoff, settings.market_intelligence_max_requests_per_run],
+            ).fetchall()
+            fixture_ids = [r[0] for r in rows if r[0]]
+
+            if fixture_ids:
+                result = await sync_market_odds(
+                    conn, fixture_ids, snapshot_type="prematch", dry_run=False
+                )
+                api_calls = result.get("api_calls", 0)
+                rows_written = result.get("rows_written", 0)
+        except (ImportError, AttributeError, Exception) as exc:
+            logger.debug("[scheduler] %s: error — %s", job_key, exc)
+
+        end = datetime.now(timezone.utc)
+        update_scheduler_state(conn, "last_market_prematch", end.isoformat())
+        log_scheduler_run(
+            conn, job_key, "completed", start, end,
+            api_calls_used=api_calls,
+            metadata={"window_hours": hours, "rows_written": rows_written},
+        )
+
+    except Exception as exc:
+        logger.error("[scheduler] %s: ERROR — %s", job_key, exc)
+        log_scheduler_run(conn, job_key, "error", start, datetime.now(timezone.utc), error_message=str(exc))
+
+
+async def market_closing_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Fetch closing odds for near-kickoff fixtures, then build closing lines."""
+    job_key = "market_closing"
+    start = datetime.now(timezone.utc)
+    conn = _conn()
+    minutes = settings.scheduler_market_closing_minutes
+
+    from app.services.scheduler_service import log_scheduler_run, update_scheduler_state
+
+    api_calls = 0
+    rows_written = 0
+    try:
+        if not _budget_ok(job_key):
+            log_scheduler_run(conn, job_key, "skipped_budget", start, datetime.now(timezone.utc))
+            return
+
+        logger.info("[scheduler] %s: ventana=%dm previos al KO", job_key, minutes)
+
+        try:
+            from app.services.market_intelligence_service import sync_market_odds, build_closing_lines
+            from datetime import timedelta
+
+            window_start = start.strftime("%Y-%m-%d %H:%M:%S")
+            window_end = (start + timedelta(minutes=minutes)).strftime("%Y-%m-%d %H:%M:%S")
+            rows = conn.execute(
+                """
+                SELECT DISTINCT provider_fixture_id FROM fixtures
+                WHERE date BETWEEN ? AND ?
+                  AND status_short NOT IN ('FT','AET','PEN','CANC','AWD','WO')
+                LIMIT 30
+                """,
+                [window_start, window_end],
+            ).fetchall()
+            fixture_ids = [r[0] for r in rows if r[0]]
+
+            if fixture_ids:
+                result = await sync_market_odds(
+                    conn, fixture_ids, snapshot_type="closing", dry_run=False
+                )
+                api_calls = result.get("api_calls", 0)
+                rows_written = result.get("rows_written", 0)
+                build_closing_lines(conn, fixture_ids, dry_run=False)
+        except (ImportError, AttributeError, Exception) as exc:
+            logger.debug("[scheduler] %s: error — %s", job_key, exc)
+
+        end = datetime.now(timezone.utc)
+        update_scheduler_state(conn, "last_market_closing", end.isoformat())
+        log_scheduler_run(
+            conn, job_key, "completed", start, end,
+            api_calls_used=api_calls,
+            metadata={"window_minutes": minutes, "rows_written": rows_written},
+        )
+
+    except Exception as exc:
+        logger.error("[scheduler] %s: ERROR — %s", job_key, exc)
+        log_scheduler_run(conn, job_key, "error", start, datetime.now(timezone.utc), error_message=str(exc))
+
+
+async def market_clv_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Compute CLV for picks against closing lines at end of day."""
+    job_key = "market_clv"
+    start = datetime.now(timezone.utc)
+    conn = _conn()
+    app = _application(context)
+
+    from app.services.scheduler_service import log_scheduler_run, update_scheduler_state, send_admin_notification
+
+    computed = 0
+    try:
+        logger.info("[scheduler] %s: calculando CLV del día", job_key)
+
+        try:
+            from app.services.market_intelligence_service import compute_pick_clv
+
+            # Pull today's picks with odds
+            today = start.strftime("%Y-%m-%d")
+            rows = conn.execute(
+                """
+                SELECT id, fixture_id, provider_fixture_id, league_id,
+                       market_key, selection, best_available_odd
+                FROM pick_candidates
+                WHERE created_at >= ?
+                  AND best_available_odd IS NOT NULL AND best_available_odd > 1.0
+                """,
+                [today],
+            ).fetchall()
+            pick_rows = [
+                {
+                    "pick_candidate_id": r[0],
+                    "fixture_id": r[1],
+                    "provider_fixture_id": r[2],
+                    "league_id": r[3],
+                    "market_key": r[4],
+                    "selection": r[5],
+                    "pick_odds": r[6],
+                }
+                for r in rows if r[0]
+            ]
+
+            if pick_rows:
+                result = compute_pick_clv(conn, pick_rows, dry_run=False)
+                computed = result.get("computed", 0)
+        except (ImportError, AttributeError, Exception) as exc:
+            logger.debug("[scheduler] %s: error — %s", job_key, exc)
+
+        end = datetime.now(timezone.utc)
+        update_scheduler_state(conn, "last_market_clv", end.isoformat())
+        log_scheduler_run(
+            conn, job_key, "completed", start, end,
+            metadata={"computed": computed},
+        )
+        logger.info("[scheduler] %s: %d CLV calculados", job_key, computed)
+
+        if settings.scheduler_notify_alerts and app and computed > 0:
+            await send_admin_notification(
+                app,
+                f"📊 <b>CLV</b> calculado — {computed} picks procesados hoy",
+            )
+
+    except Exception as exc:
+        logger.error("[scheduler] %s: ERROR — %s", job_key, exc)
+        log_scheduler_run(conn, job_key, "error", start, datetime.now(timezone.utc), error_message=str(exc))
+
+
 async def daily_report_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send daily performance report to admin users."""
     job_key = "daily_report"

@@ -189,6 +189,11 @@ def setup_scheduler(application: "Application") -> None:
         live_monitor_job,
         settlement_job,
         daily_report_job,
+        player_stats_job,
+        market_opening_job,
+        market_prematch_job,
+        market_closing_job,
+        market_clv_job,
     )
 
     registered: list[str] = []
@@ -242,6 +247,53 @@ def setup_scheduler(application: "Application") -> None:
             data={"application": application},
         )
         registered.append(f"daily_report@{t}")
+
+    if settings.scheduler_player_stats_enabled:
+        t = _parse_time(settings.scheduler_player_stats_time)
+        job_queue.run_daily(
+            player_stats_job,
+            time=t,
+            name="player_stats",
+            data={"application": application},
+        )
+        registered.append(f"player_stats@{t}")
+
+    if settings.scheduler_market_enabled:
+        t = _parse_time(settings.scheduler_market_opening_time)
+        job_queue.run_daily(
+            market_opening_job,
+            time=t,
+            name="market_opening",
+            data={"application": application},
+        )
+        registered.append(f"market_opening@{t}")
+
+        interval_h = max(1, settings.scheduler_market_prematch_hours)
+        job_queue.run_repeating(
+            market_prematch_job,
+            interval=interval_h * 3600,
+            name="market_prematch",
+            data={"application": application},
+        )
+        registered.append(f"market_prematch@{interval_h}h")
+
+        interval_m = max(5, settings.scheduler_market_closing_minutes)
+        job_queue.run_repeating(
+            market_closing_job,
+            interval=interval_m * 60,
+            name="market_closing",
+            data={"application": application},
+        )
+        registered.append(f"market_closing@{interval_m}m")
+
+        t = _parse_time(settings.scheduler_clv_time)
+        job_queue.run_daily(
+            market_clv_job,
+            time=t,
+            name="market_clv",
+            data={"application": application},
+        )
+        registered.append(f"market_clv@{t}")
 
     if registered:
         logger.info("Scheduler: %d jobs registrados — %s", len(registered), " · ".join(registered))

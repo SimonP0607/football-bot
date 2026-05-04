@@ -28,6 +28,8 @@ from app.bot.handlers.callbacks import callback_handler
 from app.bot.handlers.conversation import conversation_handler
 from app.bot.handlers.alertas import alertas_handler
 from app.bot.handlers.scheduler import scheduler_handler
+from app.bot.handlers.jugador_stats import jugadorstats_handler, props_handler, playerhot_handler
+from app.bot.handlers.mercado import mercado_handler, clv_handler
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +51,11 @@ _BOT_COMMANDS = [
     BotCommand("parlay", "Parlays recomendados del día (combinadas)"),
     BotCommand("menu", "Menú interactivo con botones"),
     BotCommand("ayuda", "Ayuda completa y guía de uso"),
+    BotCommand("jugadorstats", "Estadísticas y forma reciente de un jugador"),
+    BotCommand("props", "Señales de jugadores para un partido"),
+    BotCommand("playerhot", "Jugadores en mejor forma reciente"),
+    BotCommand("mercado", "Closing lines y señales de movimiento de cuotas"),
+    BotCommand("clv", "Reporte de Closing Line Value de los picks"),
     BotCommand("alertas", "Alertas proactivas y estado del scheduler"),
     BotCommand("scheduler", "Control del scheduler (admin)"),
     BotCommand("id", "Ver tu Telegram user ID (setup inicial)"),
@@ -147,6 +154,11 @@ def build_app() -> Application:
     application.add_handler(CommandHandler("parlay", parlay_handler))
     application.add_handler(CommandHandler("ayuda", ayuda_handler))
     application.add_handler(CommandHandler("menu", menu_handler))
+    application.add_handler(CommandHandler("jugadorstats", jugadorstats_handler))
+    application.add_handler(CommandHandler("props", props_handler))
+    application.add_handler(CommandHandler("playerhot", playerhot_handler))
+    application.add_handler(CommandHandler("mercado", mercado_handler))
+    application.add_handler(CommandHandler("clv", clv_handler))
     application.add_handler(CommandHandler("alertas", alertas_handler))
     application.add_handler(CommandHandler("scheduler", scheduler_handler))
     application.add_handler(CommandHandler("estado", estado_handler))

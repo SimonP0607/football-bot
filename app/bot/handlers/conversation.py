@@ -217,6 +217,62 @@ async def _route(intent: str, args: dict, update: Update, context: ContextTypes.
         await jugador_handler(update, context)
         return "jugador_handler"
 
+    elif intent == "player_stats":
+        from app.bot.handlers.jugador_stats import jugadorstats_handler
+        player = args.get("player_query") or ""
+        context.args = player.split() if player else []
+        await jugadorstats_handler(update, context)
+        return "jugadorstats_handler"
+
+    elif intent == "player_form":
+        from app.bot.handlers.jugador_stats import jugadorstats_handler
+        player = args.get("player_query") or ""
+        context.args = player.split() if player else []
+        await jugadorstats_handler(update, context)
+        return "jugadorstats_handler"
+
+    elif intent == "player_props":
+        from app.bot.handlers.jugador_stats import props_handler
+        fid = args.get("fixture_id")
+        context.args = [str(fid)] if fid else []
+        await props_handler(update, context)
+        return "props_handler"
+
+    elif intent == "hot_players":
+        from app.bot.handlers.jugador_stats import playerhot_handler
+        fid = args.get("fixture_id")  # re-used for league_id
+        context.args = [str(fid)] if fid else []
+        await playerhot_handler(update, context)
+        return "playerhot_handler"
+
+    elif intent == "team_players":
+        from app.bot.handlers.equipo import equipo_handler
+        team = args.get("team_query") or ""
+        context.args = team.split() if team else []
+        await equipo_handler(update, context)
+        return "equipo_handler"
+
+    elif intent == "fixture_market":
+        from app.bot.handlers.mercado import mercado_handler
+        fid = args.get("fixture_id")
+        context.args = [str(fid)] if fid else []
+        await mercado_handler(update, context)
+        return "mercado_handler"
+
+    elif intent == "clv_summary":
+        from app.bot.handlers.mercado import clv_handler
+        days = args.get("days")
+        context.args = [str(days)] if days else []
+        await clv_handler(update, context)
+        return "clv_handler"
+
+    elif intent in ("market_summary", "odds_movement", "bookmaker_coverage"):
+        from app.bot.handlers.mercado import mercado_handler
+        fid = args.get("fixture_id")
+        context.args = [str(fid)] if fid else []
+        await mercado_handler(update, context)
+        return "mercado_handler"
+
     elif intent == "help":
         context.args = []
         await ayuda_handler(update, context)

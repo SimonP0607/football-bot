@@ -29,6 +29,9 @@ calibrado con datos históricos. <b>Los picks son informativos. No son consejos 
 /seguimiento &lt;id&gt; — seguimiento de un partido concreto
 /equipo &lt;nombre&gt; — buscar equipo en catálogo
 /jugador &lt;nombre&gt; — buscar jugador
+/jugadorstats &lt;nombre&gt; — estadísticas y forma reciente de un jugador
+/props &lt;fixture_id&gt; — señales de jugadores para un partido (no son apuestas)
+/playerhot [liga|goles|tiros|tarjetas] — jugadores en mejor forma reciente
 /estado — salud del sistema (BD, API, sync)
 /menu — menú con botones
 /ayuda — esta pantalla
@@ -42,6 +45,9 @@ También puedes escribir en lenguaje natural:
 · "Partidos en vivo"
 · "Estado del sistema"
 · "Sigue el partido 1535267"
+· "Cómo viene Salah"
+· "Jugadores calientes de Premier"
+· "Prop signals del partido 1060362"
 
 <b>Cómo interpretar las métricas</b>
 · <b>Edge</b> — diferencia entre probabilidad del modelo y probabilidad implícita de la cuota. \
