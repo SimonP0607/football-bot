@@ -75,6 +75,22 @@ _EMPTY: dict = {
     # Phase 6
     "prematch_signal":              None,
     "provider_league_id":           None,
+    # Phase 13: strategy learning (None = not evaluated or feature off)
+    "strategy_key":                 None,
+    "strategy_score":               None,
+    "strategy_recommendation":      None,
+    "strategy_sample_size":         None,
+    "strategy_roi":                 None,
+    "strategy_clv_beat_rate":       None,
+    # Phase 14: bankroll & risk (None = engine off or not evaluated)
+    "bankroll_risk_score":          None,
+    "bankroll_risk_label":          None,
+    "bankroll_recommended_units":   None,
+    "bankroll_stake_label":         None,
+    "bankroll_kelly_full":          None,
+    "bankroll_kelly_frac":          None,
+    "bankroll_exposure_flags":      None,
+    "bankroll_warning":             None,
 }
 
 
@@ -327,6 +343,92 @@ class ValueEngineLiveAdapter:
             logger.debug(
                 "VE: _enrich_with_prematch fid=%s failed: %s", fix.get("id"), exc
             )
+
+    # ── Phase 13: Strategy Learning integration ───────────────────────────────
+
+    def _enrich_with_strategy(
+        self,
+        result: dict,
+        conn,
+        candidate: "PredictionCandidate",
+        pick_r: dict,
+    ) -> None:
+        """Mutate result in-place with strategy learning metadata. Never raises.
+
+        If STRATEGY_LEARNING_ENABLED=false (default): no-op.
+        If STRATEGY_LEARNING_USE_FOR_SELECTION=false (default): metadata only, no score change.
+        If STRATEGY_LEARNING_USE_FOR_SELECTION=true: may adjust quality_score within caps.
+        """
+        try:
+            if not settings.strategy_learning_enabled:
+                return
+
+            from app.services.strategy_learning_service import get_strategy_for_pick
+            strat = get_strategy_for_pick(
+                conn,
+                market_key=candidate.market,
+                league_id=result.get("provider_league_id"),
+                pick_odds_val=pick_r.get("offered_odds"),
+                edge_val=pick_r.get("edge"),
+                confidence_val=pick_r.get("p_cal"),
+            )
+            if strat is None:
+                return
+
+            result["strategy_key"]            = strat.get("strategy_key")
+            result["strategy_score"]          = strat.get("strategy_score")
+            result["strategy_recommendation"] = strat.get("recommendation")
+            result["strategy_sample_size"]    = strat.get("sample_size")
+            result["strategy_roi"]            = strat.get("roi")
+            result["strategy_clv_beat_rate"]  = strat.get("clv_beat_rate")
+
+            if not settings.strategy_learning_use_for_selection:
+                return  # metadata only — do NOT change quality_score
+
+            # Selection-affecting logic (only when explicitly enabled)
+            rec    = strat.get("recommendation")
+            sample = strat.get("sample_size") or 0
+            score  = strat.get("strategy_score") or 0.0
+            min_s  = settings.strategy_learning_min_sample
+
+            if sample < min_s:
+                return  # not enough data to trust
+
+            current_quality = result.get("quality_score") or 0.0
+
+            if rec == "promote" and score >= settings.strategy_learning_score_promote:
+                boost = min(
+                    settings.strategy_learning_max_boost,
+                    (score - 70.0) / 100.0,
+                )
+                result["quality_score"] = round(
+                    max(0.0, min(1.0, current_quality + boost)), 4
+                )
+
+            elif rec in ("reduce", "avoid") and score <= settings.strategy_learning_score_reduce:
+                penalty = min(
+                    settings.strategy_learning_max_penalty,
+                    (50.0 - score) / 100.0,
+                )
+                result["quality_score"] = round(
+                    max(0.0, min(1.0, current_quality - penalty)), 4
+                )
+
+                if (
+                    rec == "avoid"
+                    and sample >= min_s
+                    and (strat.get("roi") or 0.0) < -0.10
+                    and (strat.get("avg_clv_percent") or 0.0) < -1.0
+                    and result.get("quality_score", 1.0) < settings.value_engine_min_quality
+                    and result.get("value_engine_status") == STATUS_SELECTED
+                ):
+                    result["value_engine_status"] = "value_rejected_strategy"
+                    result["rejection_reason"] = (
+                        f"strategy_avoid: score={score:.1f} sample={sample}"
+                    )
+
+        except Exception as exc:
+            logger.debug("VE: _enrich_with_strategy failed: %s", exc)
 
     # ── Phase 5: Availability integration ────────────────────────────────────
 
@@ -775,12 +877,20 @@ class ValueEngineLiveAdapter:
                 "availability_warning":         None,
                 # Phase 6: filled by _enrich_with_prematch (None until then)
                 "prematch_signal":              None,
+                # Phase 13: filled by _enrich_with_strategy (None until then)
+                "strategy_key":                 None,
+                "strategy_score":               None,
+                "strategy_recommendation":      None,
+                "strategy_sample_size":         None,
+                "strategy_roi":                 None,
+                "strategy_clv_beat_rate":       None,
             }
 
             conn = self._get_conn()
             if conn is not None:
                 self._enrich_with_availability(results[key], conn, fix, info, candidate)
                 self._enrich_with_prematch(results[key], conn, fix, candidate)
+                self._enrich_with_strategy(results[key], conn, candidate, pick_r)
 
         n_ok  = sum(1 for v in results.values() if v.get("value_engine_status") == STATUS_SELECTED)
         n_err = sum(1 for v in results.values() if v.get("value_engine_status") == STATUS_ERROR)

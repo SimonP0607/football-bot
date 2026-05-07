@@ -140,6 +140,14 @@ def _pick_block(pred: dict, fix: dict, team_names: dict, league_names: dict) -> 
     except Exception:
         pass
 
+    # Strategy learning label (Phase 13)
+    try:
+        strat_lbl = pred.get("strategy_label")
+        if strat_lbl:
+            lines.append(f"📈 Estrategia: {esc(strat_lbl)}")
+    except Exception:
+        pass
+
     return "\n".join(lines)
 
 

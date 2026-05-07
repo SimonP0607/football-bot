@@ -89,6 +89,16 @@ EXPECTED_TABLES = [
     "market_closing_lines",
     "pick_clv_results",
     "market_movement_signals",
+    # 013_strategy_learning_schema.sql
+    "strategy_profiles",
+    "strategy_learning_runs",
+    "strategy_adjustments",
+    "pick_learning_annotations",
+    # 014_bankroll_risk_schema.sql
+    "bankroll_profiles",
+    "stake_recommendations",
+    "portfolio_risk_snapshots",
+    "risk_events",
 ]
 
 

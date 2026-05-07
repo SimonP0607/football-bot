@@ -42,6 +42,37 @@ async def top_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         team_names = get_teams_by_ids(team_ids)
         league_names = get_leagues_by_ids(league_ids)
 
+        # Strategy label enrichment (best-effort, Phase 13)
+        if predictions and settings.strategy_learning_enabled:
+            try:
+                from app.bot.handlers.estrategias import get_strategy_label
+                for pred in predictions:
+                    lbl = get_strategy_label(
+                        pred.get("strategy_recommendation"),
+                        pred.get("strategy_score"),
+                        pred.get("strategy_sample_size"),
+                    )
+                    if lbl:
+                        pred["strategy_label"] = lbl
+            except Exception:
+                pass
+
+        # Bankroll enrichment (best-effort, Phase 14)
+        if predictions and settings.bankroll_engine_enabled:
+            try:
+                from app.data.local.duckdb_client import get_local_db, init_schema
+                from app.services.bankroll_risk_service import get_bankroll_meta_for_pick
+                _bconn = get_local_db()
+                init_schema(_bconn)
+                for pred in predictions:
+                    _bmeta = get_bankroll_meta_for_pick(_bconn, pred)
+                    if _bmeta.get("bankroll_recommended_units") is not None:
+                        pred["bankroll_recommended_units"] = _bmeta["bankroll_recommended_units"]
+                    if _bmeta.get("bankroll_risk_label"):
+                        pred["bankroll_risk_label"] = _bmeta["bankroll_risk_label"]
+            except Exception:
+                pass
+
         # When no official picks and VE is active, surface a diagnostic breakdown
         # so the user understands why nothing was published.
         ve_summary: dict | None = None

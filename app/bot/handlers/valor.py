@@ -246,4 +246,62 @@ def _build_valor_text() -> str:
         logger.debug("/valor: error leyendo candidatos hoy: %s", exc)
         lines.append("<i>No se pudieron leer los candidatos de hoy</i>")
 
+    # ── Strategy learning summary ─────────────────────────────────────────────
+    if settings.strategy_learning_enabled:
+        try:
+            from app.data.local.duckdb_client import get_local_db, init_schema
+            from app.data.local.strategy_learning_repo import (
+                get_best_strategies, get_weak_strategies, get_learning_summary,
+            )
+            _sconn = get_local_db()
+            init_schema(_sconn)
+            _summary = get_learning_summary(_sconn)
+            _n_profiles = _summary.get("total_profiles", 0)
+            if _n_profiles > 0:
+                lines.append("")
+                lines.append("<b>Aprendizaje Estrategico</b>")
+                lines.append(
+                    f"  Perfiles: <b>{_n_profiles}</b>  "
+                    f"· Picks anotados: <b>{_summary.get('total_annotations', 0)}</b>"
+                )
+                _best = get_best_strategies(_sconn, limit=2)
+                _weak = get_weak_strategies(_sconn, limit=2)
+                if _best:
+                    best_mkts = ", ".join(p.get("market_key") or "-" for p in _best)
+                    lines.append(f"  Mejores mercados: <b>{best_mkts}</b>")
+                if _weak:
+                    weak_mkts = ", ".join(p.get("market_key") or "-" for p in _weak)
+                    lines.append(f"  Mercados debiles: <b>{weak_mkts}</b>")
+                lines.append("  /estrategias — detalle completo")
+        except Exception as exc:
+            logger.debug("/valor: strategy learning DuckDB error: %s", exc)
+
+    # ── Bankroll Engine summary ───────────────────────────────────────────────
+    if settings.bankroll_engine_enabled:
+        try:
+            from app.data.local.duckdb_client import get_local_db, init_schema
+            from app.data.local.bankroll_risk_repo import (
+                get_latest_portfolio_snapshot, get_bankroll_summary,
+            )
+            _bconn = get_local_db()
+            init_schema(_bconn)
+            _bsnap = get_latest_portfolio_snapshot(_bconn)
+            _bsumm = get_bankroll_summary(_bconn, days=1)
+            if _bsnap or _bsumm.get("total_recommendations", 0) > 0:
+                lines.append("")
+                lines.append("<b>Bankroll Engine</b>")
+                if _bsnap:
+                    _blevel = (_bsnap.get("risk_level") or "unknown").upper()
+                    _bscore = _bsnap.get("portfolio_score")
+                    _bscore_str = f"{_bscore:.0f}/100" if _bscore is not None else "n/a"
+                    lines.append(f"  Portfolio: <b>{_bscore_str}</b> — {_blevel}")
+                    _bunits = _bsnap.get("total_recommended_units") or 0.0
+                    lines.append(f"  Unidades hoy: <b>{_bunits:.2f}u</b>")
+                else:
+                    _bwith = _bsumm.get("with_stake", 0)
+                    lines.append(f"  Picks con stake hoy: <b>{_bwith}</b>")
+                lines.append("  /bankroll — detalle completo")
+        except Exception as exc:
+            logger.debug("/valor: bankroll engine DuckDB error: %s", exc)
+
     return "\n".join(lines)

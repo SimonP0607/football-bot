@@ -507,6 +507,87 @@ async def market_clv_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         log_scheduler_run(conn, job_key, "error", start, datetime.now(timezone.utc), error_message=str(exc))
 
 
+async def strategy_learning_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Daily strategy learning profile rebuild from resolved picks + CLV data."""
+    job_key = "strategy_learning"
+    start = datetime.now(timezone.utc)
+    conn = _conn()
+
+    from app.services.scheduler_service import log_scheduler_run, update_scheduler_state
+
+    try:
+        if not settings.strategy_learning_enabled:
+            return
+
+        logger.info("[scheduler] %s: iniciando rebuild de perfiles de estrategia", job_key)
+
+        from app.services.strategy_learning_service import run_strategy_learning
+        result = run_strategy_learning(
+            conn,
+            days=settings.scheduler_strategy_learning_days,
+            dry_run=False,
+        )
+
+        end = datetime.now(timezone.utc)
+        update_scheduler_state(conn, "last_strategy_learning", end.isoformat())
+        log_scheduler_run(
+            conn, job_key, "completed", start, end,
+            metadata={
+                "profiles":    result.get("profiles", 0),
+                "annotations": result.get("annotations", 0),
+                "adjustments": result.get("adjustments", 0),
+            },
+        )
+        logger.info(
+            "[scheduler] %s: %d perfiles en %.1fs",
+            job_key, result.get("profiles", 0), (end - start).total_seconds(),
+        )
+
+    except Exception as exc:
+        logger.error("[scheduler] %s: ERROR — %s", job_key, exc, exc_info=True)
+        log_scheduler_run(conn, job_key, "error", start, datetime.now(timezone.utc), error_message=str(exc))
+
+
+async def bankroll_risk_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Daily bankroll & stake sizing computation (dry_run by default)."""
+    job_key = "bankroll_risk"
+    start = datetime.now(timezone.utc)
+    conn = _conn()
+
+    from app.services.scheduler_service import log_scheduler_run, update_scheduler_state
+
+    try:
+        if not settings.bankroll_engine_enabled:
+            return
+
+        logger.info("[scheduler] %s: iniciando calculo de bankroll", job_key)
+
+        from app.services.bankroll_risk_service import run_bankroll_risk
+        result = run_bankroll_risk(conn, days=1, dry_run=not settings.bankroll_use_for_selection)
+
+        end = datetime.now(timezone.utc)
+        update_scheduler_state(conn, "last_bankroll_risk", end.isoformat())
+        log_scheduler_run(
+            conn, job_key, "completed", start, end,
+            metadata={
+                "picks":       result.get("picks", 0),
+                "with_stake":  result.get("with_stake", 0),
+                "total_units": result.get("total_units", 0.0),
+                "risk_level":  result.get("risk_level"),
+            },
+        )
+        logger.info(
+            "[scheduler] %s: %d picks, %d con stake, %.2fu, nivel=%s en %.1fs",
+            job_key, result.get("picks", 0), result.get("with_stake", 0),
+            result.get("total_units", 0.0), result.get("risk_level", "?"),
+            (end - start).total_seconds(),
+        )
+
+    except Exception as exc:
+        logger.error("[scheduler] %s: ERROR — %s", job_key, exc, exc_info=True)
+        log_scheduler_run(conn, job_key, "error", start, datetime.now(timezone.utc), error_message=str(exc))
+
+
 async def daily_report_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send daily performance report to admin users."""
     job_key = "daily_report"

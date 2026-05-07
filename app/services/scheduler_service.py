@@ -194,6 +194,8 @@ def setup_scheduler(application: "Application") -> None:
         market_prematch_job,
         market_closing_job,
         market_clv_job,
+        strategy_learning_job,
+        bankroll_risk_job,
     )
 
     registered: list[str] = []
@@ -294,6 +296,26 @@ def setup_scheduler(application: "Application") -> None:
             data={"application": application},
         )
         registered.append(f"market_clv@{t}")
+
+    if settings.scheduler_strategy_learning_enabled:
+        t = _parse_time(settings.scheduler_strategy_learning_time)
+        job_queue.run_daily(
+            strategy_learning_job,
+            time=t,
+            name="strategy_learning",
+            data={"application": application},
+        )
+        registered.append(f"strategy_learning@{t}")
+
+    if settings.scheduler_bankroll_enabled:
+        t = _parse_time(settings.scheduler_bankroll_time)
+        job_queue.run_daily(
+            bankroll_risk_job,
+            time=t,
+            name="bankroll_risk",
+            data={"application": application},
+        )
+        registered.append(f"bankroll_risk@{t}")
 
     if registered:
         logger.info("Scheduler: %d jobs registrados — %s", len(registered), " · ".join(registered))

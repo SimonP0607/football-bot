@@ -158,6 +158,23 @@ async def partido_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         # Append market intelligence if available
         if market_summary:
             text += _format_market_summary(market_summary)
+
+        # Phase 14: bankroll risk (best-effort, never blocks)
+        try:
+            from app.core.config import settings as _s
+            if _s.bankroll_engine_enabled:
+                from app.data.local.duckdb_client import get_local_db, init_schema
+                from app.services.bankroll_risk_service import get_bankroll_meta_for_pick
+                _bconn = get_local_db()
+                init_schema(_bconn)
+                for cand in (candidates or []):
+                    _bmeta = get_bankroll_meta_for_pick(_bconn, cand)
+                    if _bmeta.get("bankroll_recommended_units") is not None:
+                        text += _format_bankroll_meta(_bmeta)
+                        break
+        except Exception as _br_exc:
+            logger.debug("/partido: bankroll meta failed — %s", _br_exc)
+
     except Exception as exc:
         logger.error("/partido: error analizando fixture_id=%s — %s", fixture["id"], exc, exc_info=True)
         await update.message.reply_text(
@@ -223,6 +240,29 @@ def _format_market_summary(summary: dict) -> str:
         lines.append("  ⚠ " + " · ".join(flags))
 
     lines.append("<i>Usa /mercado para análisis completo</i>")
+    return "\n".join(lines)
+
+
+def _format_bankroll_meta(meta: dict) -> str:
+    """Format Phase 14 bankroll risk metadata as HTML append to /partido."""
+    if not meta or meta.get("bankroll_recommended_units") is None:
+        return ""
+    units = meta.get("bankroll_recommended_units") or 0.0
+    label = meta.get("bankroll_stake_label") or "?"
+    risk_label = meta.get("bankroll_risk_label") or "?"
+    kelly = meta.get("bankroll_kelly_full")
+    kelly_str = f"{kelly:.3f}" if kelly is not None else "n/a"
+    lines = [
+        "\n\n─" * 14,
+        "<b>Bankroll Engine</b>",
+        f"  Stake recomendado: <b>{units:.2f}u ({label})</b>",
+        f"  Riesgo del pick:   <b>{risk_label}</b>",
+        f"  Kelly completo:    <code>{kelly_str}</code>",
+    ]
+    warning = meta.get("bankroll_warning")
+    if warning:
+        lines.append(f"  Aviso: <i>{warning}</i>")
+    lines.append("<i>Usa /bankroll para ver el portafolio completo</i>")
     return "\n".join(lines)
 
 

@@ -339,6 +339,62 @@ class Settings:
     scheduler_market_closing_minutes: int = _int("SCHEDULER_MARKET_CLOSING_MINUTES", 15)
     scheduler_clv_time: str = os.getenv("SCHEDULER_CLV_TIME", "23:45").strip()
 
+    # ── Phase 13: CLV Learning Loop & Strategy Scoring ───────────────────────
+    # Master switch — if false, strategy learning never runs and VE is unaffected.
+    strategy_learning_enabled: bool = (
+        os.getenv("STRATEGY_LEARNING_ENABLED", "false").strip().lower() == "true"
+    )
+    # If false (default), strategy metadata is added to VE result but picks are NOT changed.
+    # If true, promote/reduce/avoid signals can adjust quality_score within caps below.
+    strategy_learning_use_for_selection: bool = (
+        os.getenv("STRATEGY_LEARNING_USE_FOR_SELECTION", "false").strip().lower() == "true"
+    )
+    # Minimum sample_size before a strategy recommendation is trusted for selection.
+    strategy_learning_min_sample: int = _int("STRATEGY_LEARNING_MIN_SAMPLE", 50)
+    # Strategy score threshold for "promote" recommendation (max boost applied).
+    strategy_learning_score_promote: float = _float("STRATEGY_LEARNING_SCORE_PROMOTE", 75.0)
+    # Strategy score threshold below which "reduce" recommendation is applied.
+    strategy_learning_score_reduce: float = _float("STRATEGY_LEARNING_SCORE_REDUCE", 40.0)
+    # Maximum quality_score penalty applied for "reduce"/"avoid" strategies.
+    strategy_learning_max_penalty: float = _float("STRATEGY_LEARNING_MAX_PENALTY", 0.08)
+    # Maximum quality_score boost applied for "promote" strategies.
+    strategy_learning_max_boost: float = _float("STRATEGY_LEARNING_MAX_BOOST", 0.05)
+    # Scheduler job settings for strategy learning
+    scheduler_strategy_learning_enabled: bool = (
+        os.getenv("SCHEDULER_STRATEGY_LEARNING_ENABLED", "false").strip().lower() == "true"
+    )
+    scheduler_strategy_learning_time: str = os.getenv("SCHEDULER_STRATEGY_LEARNING_TIME", "00:30").strip()
+    scheduler_strategy_learning_days: int = _int("SCHEDULER_STRATEGY_LEARNING_DAYS", 30)
+
+    # ── Phase 14: Bankroll, Stake Sizing & Risk Portfolio Engine ─────────────
+    # Master switch — if false, bankroll engine never runs.
+    bankroll_engine_enabled: bool = (
+        os.getenv("BANKROLL_ENGINE_ENABLED", "false").strip().lower() == "true"
+    )
+    # If false (default), bankroll metadata added but picks NOT changed.
+    # If true, can reduce priority of high-risk picks (never increases them).
+    bankroll_use_for_selection: bool = (
+        os.getenv("BANKROLL_USE_FOR_SELECTION", "false").strip().lower() == "true"
+    )
+    bankroll_default_units: float = _float("BANKROLL_DEFAULT_UNITS", 100.0)
+    bankroll_base_unit_size: float = _float("BANKROLL_BASE_UNIT_SIZE", 1.0)
+    bankroll_kelly_fraction: float = _float("BANKROLL_KELLY_FRACTION", 0.25)
+    bankroll_max_pick_units: float = _float("BANKROLL_MAX_PICK_UNITS", 1.5)
+    bankroll_max_daily_units: float = _float("BANKROLL_MAX_DAILY_UNITS", 5.0)
+    bankroll_max_parlay_units: float = _float("BANKROLL_MAX_PARLAY_UNITS", 0.5)
+    bankroll_min_edge: float = _float("BANKROLL_MIN_EDGE", 0.02)
+    bankroll_min_confidence: float = _float("BANKROLL_MIN_CONFIDENCE", 0.52)
+    bankroll_reduce_low_sample: bool = (
+        os.getenv("BANKROLL_REDUCE_LOW_SAMPLE", "true").strip().lower() == "true"
+    )
+    bankroll_block_avoid_strategy: bool = (
+        os.getenv("BANKROLL_BLOCK_AVOID_STRATEGY", "true").strip().lower() == "true"
+    )
+    scheduler_bankroll_enabled: bool = (
+        os.getenv("SCHEDULER_BANKROLL_ENABLED", "false").strip().lower() == "true"
+    )
+    scheduler_bankroll_time: str = os.getenv("SCHEDULER_BANKROLL_TIME", "09:30").strip()
+
     # ── Política de ingestión histórica (Phase 3) ─────────────────────────────
     # Máximo de temporadas cerradas a conservar por liga en DuckDB.
     history_max_closed_seasons: int = _int("HISTORY_MAX_CLOSED_SEASONS", 4)

@@ -30,6 +30,8 @@ from app.bot.handlers.alertas import alertas_handler
 from app.bot.handlers.scheduler import scheduler_handler
 from app.bot.handlers.jugador_stats import jugadorstats_handler, props_handler, playerhot_handler
 from app.bot.handlers.mercado import mercado_handler, clv_handler
+from app.bot.handlers.estrategias import estrategias_handler, estrategia_handler
+from app.bot.handlers.bankroll import bankroll_handler, riesgo_handler, stake_handler
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +58,11 @@ _BOT_COMMANDS = [
     BotCommand("playerhot", "Jugadores en mejor forma reciente"),
     BotCommand("mercado", "Closing lines y señales de movimiento de cuotas"),
     BotCommand("clv", "Reporte de Closing Line Value de los picks"),
+    BotCommand("estrategias", "Resumen de aprendizaje estrategico"),
+    BotCommand("estrategia", "Detalle de una estrategia especifica"),
+    BotCommand("bankroll", "Estado del bankroll engine y portfolio"),
+    BotCommand("riesgo", "Nivel de riesgo del portfolio y alertas"),
+    BotCommand("stake", "Metodologia de sizing de apuestas"),
     BotCommand("alertas", "Alertas proactivas y estado del scheduler"),
     BotCommand("scheduler", "Control del scheduler (admin)"),
     BotCommand("id", "Ver tu Telegram user ID (setup inicial)"),
@@ -159,6 +166,11 @@ def build_app() -> Application:
     application.add_handler(CommandHandler("playerhot", playerhot_handler))
     application.add_handler(CommandHandler("mercado", mercado_handler))
     application.add_handler(CommandHandler("clv", clv_handler))
+    application.add_handler(CommandHandler("estrategias", estrategias_handler))
+    application.add_handler(CommandHandler("estrategia", estrategia_handler))
+    application.add_handler(CommandHandler("bankroll", bankroll_handler))
+    application.add_handler(CommandHandler("riesgo", riesgo_handler))
+    application.add_handler(CommandHandler("stake", stake_handler))
     application.add_handler(CommandHandler("alertas", alertas_handler))
     application.add_handler(CommandHandler("scheduler", scheduler_handler))
     application.add_handler(CommandHandler("estado", estado_handler))

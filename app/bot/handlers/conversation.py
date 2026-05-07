@@ -273,6 +273,45 @@ async def _route(intent: str, args: dict, update: Update, context: ContextTypes.
         await mercado_handler(update, context)
         return "mercado_handler"
 
+    elif intent in ("strategy_summary", "strategy_learning_status", "why_pick_strategy"):
+        from app.bot.handlers.estrategias import estrategias_handler
+        context.args = []
+        await estrategias_handler(update, context)
+        return "estrategias_handler"
+
+    elif intent == "best_strategies":
+        from app.bot.handlers.estrategias import estrategias_handler
+        context.args = ["mejor"]
+        await estrategias_handler(update, context)
+        return "estrategias_handler_best"
+
+    elif intent == "weak_strategies":
+        from app.bot.handlers.estrategias import estrategias_handler
+        context.args = ["peor"]
+        await estrategias_handler(update, context)
+        return "estrategias_handler_worst"
+
+    elif intent == "strategy_detail":
+        from app.bot.handlers.estrategias import estrategias_handler
+        context.args = []
+        await estrategias_handler(update, context)
+        return "estrategias_handler"
+
+    elif intent == "bankroll_summary":
+        from app.bot.handlers.bankroll import bankroll_handler
+        await bankroll_handler(update, context)
+        return "bankroll_handler"
+
+    elif intent in ("risk_summary", "exposure_question", "correlation_question"):
+        from app.bot.handlers.bankroll import riesgo_handler
+        await riesgo_handler(update, context)
+        return "riesgo_handler"
+
+    elif intent in ("stake_question", "bankroll_help"):
+        from app.bot.handlers.bankroll import stake_handler
+        await stake_handler(update, context)
+        return "stake_handler"
+
     elif intent == "help":
         context.args = []
         await ayuda_handler(update, context)

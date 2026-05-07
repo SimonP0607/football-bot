@@ -28,6 +28,12 @@ _VALID_INTENTS = {
     "player_stats", "player_props", "hot_players", "team_players", "player_form",
     # Phase 12: Market Intelligence
     "market_summary", "fixture_market", "clv_summary", "odds_movement", "bookmaker_coverage",
+    # Phase 13: Strategy Learning
+    "strategy_summary", "best_strategies", "weak_strategies",
+    "strategy_detail", "why_pick_strategy", "strategy_learning_status",
+    # Phase 14: Bankroll & Risk
+    "bankroll_summary", "risk_summary", "stake_question",
+    "exposure_question", "correlation_question", "bankroll_help",
 }
 
 _EMPTY_ARGS = {
@@ -191,6 +197,9 @@ def classify_with_rules(text: str, user_context: dict | None = None) -> dict:
         return _make_result("live", 0.93, safety_note=safety)
 
     # ── Performance ───────────────────────────────────────────────────────────
+    # Strategy-scoped ROI queries (liga/estrategia + mejor/peor + roi) go to strategy intents
+    if _has(t, "roi") and _has(t, "liga", "ligas", "estrategia", "estrategias") and _has(t, "mejor", "mejores", "top"):
+        return _make_result("best_strategies", 0.90)
     if _has(t, "rendimiento", "roi", "hit rate", "yield", "rentabilidad", "estadísticas", "estadisticas"):
         days = _extract_days(t)
         return _make_result("performance", 0.93, args={"days": days})
@@ -246,6 +255,88 @@ def classify_with_rules(text: str, user_context: dict | None = None) -> dict:
     if _has(t, "bookmaker", "casa de apuestas", "casas de apuestas", "bet365",
              "pinnacle", "betfair", "1xbet", "cobertura de casas"):
         return _make_result("bookmaker_coverage", 0.88)
+
+    # ── Phase 14: Bankroll & Risk (before fixture_analysis) ──────────────────
+
+    # bankroll_help: how bankroll engine works
+    if _has(t, "bankroll engine", "motor de bankroll", "como funciona el bankroll",
+             "que es el bankroll", "bankroll system"):
+        return _make_result("bankroll_help", 0.95)
+    if _has(t, "ayuda") and _has(t, "bankroll", "riesgo del portafolio", "stake engine"):
+        return _make_result("bankroll_help", 0.90)
+
+    # bankroll_summary: current bankroll status
+    if _has(t, "bankroll") and _has(t, "como esta", "cuanto tengo", "estado", "saldo",
+                                     "resumen", "cuanto hay", "mi bankroll", "ver bankroll"):
+        return _make_result("bankroll_summary", 0.95)
+    if _has(t, "bankroll") and not _has(t, "ayuda", "help", "como funciona"):
+        return _make_result("bankroll_summary", 0.85)
+
+    # risk_summary: portfolio risk / portfolio score
+    if _has(t, "riesgo del portafolio", "riesgo del portfolio",
+             "portafolio de riesgo", "portfolio de riesgo",
+             "nivel de riesgo del portafolio", "portfolio score"):
+        return _make_result("risk_summary", 0.95)
+    if _has(t, "portafolio", "portfolio") and _has(t, "riesgo", "score", "nivel"):
+        return _make_result("risk_summary", 0.90)
+
+    # stake_question: how much to stake on a pick
+    if _has(t, "cuanto deberia apostar", "cuanto apostar", "cuanto poner",
+             "stake recomendado", "que stake", "stake recomiendan",
+             "recomendacion de apuesta", "stake para"):
+        return _make_result("stake_question", 0.95, safety_note=safety)
+    if _has(t, "stake") and _has(t, "recomend", "cuanto", "para este", "pick"):
+        return _make_result("stake_question", 0.88, safety_note=safety)
+
+    # exposure_question: unit exposure by league/market/team
+    if _has(t, "exposicion", "exposición", "exposure") and _has(
+        t, "liga", "mercado", "equipo", "tengo", "cuanta", "por"
+    ):
+        return _make_result("exposure_question", 0.93)
+    if _has(t, "exposicion por liga", "exposicion por mercado", "exposicion por equipo",
+             "exposicion total"):
+        return _make_result("exposure_question", 0.95)
+
+    # correlation_question: correlated picks detection
+    if _has(t, "correlacionados", "correlacion", "picks correlados",
+             "hay correlacion", "picks correlacionados", "correlacion entre picks"):
+        return _make_result("correlation_question", 0.95)
+    if _has(t, "correlacion") and _has(t, "picks", "apuestas", "hoy", "actuales"):
+        return _make_result("correlation_question", 0.88)
+
+    # ── Phase 13: Strategy Learning (before fixture_analysis) ─────────────────
+
+    # strategy_learning_status: feature status / config
+    if _has(t, "aprendizaje estrategico", "strategy learning", "aprendizaje activo",
+             "aprendizaje desactivado", "aprendizaje del bot", "como va el aprendizaje",
+             "estado del aprendizaje"):
+        return _make_result("strategy_learning_status", 0.95)
+    if _has(t, "aprendizaje") and _has(t, "bot", "sistema", "estado", "activo", "va"):
+        return _make_result("strategy_learning_status", 0.88)
+
+    # best_strategies: top performing strategies (including league ROI queries)
+    if _has(t, "estrategia", "estrategias", "liga", "ligas") and _has(
+        t, "mejor", "mejores", "top", "fuerte", "fuertes", "promote", "mejor roi", "mas roi"
+    ):
+        return _make_result("best_strategies", 0.93)
+
+    # weak_strategies: underperforming strategies
+    if _has(t, "estrategia", "estrategias") and _has(t, "peor", "peores", "debil",
+                                                      "debiles", "peligrosa", "avoid",
+                                                      "reduce", "evitar"):
+        return _make_result("weak_strategies", 0.93)
+
+    # strategy_detail: specific strategy key
+    if _has(t, "estrategia") and _has(t, "detalle", "clave", "key", "especifica", "especifico"):
+        return _make_result("strategy_detail", 0.88)
+
+    # why_pick_strategy: explain why a pick fits a strategy
+    if _has(t, "por que", "porque", "why") and _has(t, "estrategia", "pick", "seleccion"):
+        return _make_result("why_pick_strategy", 0.85)
+
+    # strategy_summary: general strategy learning overview
+    if _has(t, "estrategia", "estrategias") and not _has(t, "liga", "equipo", "jugador"):
+        return _make_result("strategy_summary", 0.85)
 
     # ── Fixture / Team analysis ────────────────────────────────────────────────
     if _has(t, "analiza", "análisis", "analisis") or (
