@@ -1,0 +1,15 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c ' *)",
+      "Bash(not exist *)",
+      "PowerShell(New-Item -ItemType Directory -Force -Path \"c:\\\\Users\\\\simon_zkmbj72\\\\Documents\\\\football-bot\\\\app\\\\dashboard\\\\pages\")",
+      "Bash(python scripts/test_dashboard.py)",
+      "Bash(python -c \"with open\\('project_state.md', encoding='utf-8'\\) as f: lines = f.readlines\\(\\); print\\(f'Total lines: {len\\(lines\\)}'\\)\")",
+      "Bash(python -c \"with open\\('project_state.md', encoding='utf-8'\\) as f: lines = f.readlines\\(\\); print\\(f'Total lines: {len\\(lines\\)}'\\); print\\(''.join\\(lines[-5:]\\)\\)\")"
+    ],
+    "additionalDirectories": [
+      "c:\\Users\\simon_zkmbj72\\.claude\\projects\\c--Users-simon-zkmbj72-Documents-football-bot\\memory"
+    ]
+  }
+}

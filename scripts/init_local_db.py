@@ -99,6 +99,12 @@ EXPECTED_TABLES = [
     "stake_recommendations",
     "portfolio_risk_snapshots",
     "risk_events",
+    # 015_model_governance_schema.sql
+    "experiment_registry",
+    "experiment_pick_assignments",
+    "experiment_results",
+    "model_decision_audit",
+    "activation_recommendations",
 ]
 
 

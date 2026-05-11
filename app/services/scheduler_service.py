@@ -196,6 +196,7 @@ def setup_scheduler(application: "Application") -> None:
         market_clv_job,
         strategy_learning_job,
         bankroll_risk_job,
+        model_governance_job,
     )
 
     registered: list[str] = []
@@ -316,6 +317,16 @@ def setup_scheduler(application: "Application") -> None:
             data={"application": application},
         )
         registered.append(f"bankroll_risk@{t}")
+
+    if settings.scheduler_governance_enabled:
+        t = _parse_time(settings.scheduler_governance_time)
+        job_queue.run_daily(
+            model_governance_job,
+            time=t,
+            name="model_governance",
+            data={"application": application},
+        )
+        registered.append(f"model_governance@{t}")
 
     if registered:
         logger.info("Scheduler: %d jobs registrados — %s", len(registered), " · ".join(registered))

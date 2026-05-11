@@ -395,6 +395,38 @@ class Settings:
     )
     scheduler_bankroll_time: str = os.getenv("SCHEDULER_BANKROLL_TIME", "09:30").strip()
 
+    # ── Phase 15: Model Governance, Experiment Lab & Safe Activation Control ──
+    # Master switch — if false, governance engine never runs.
+    model_governance_enabled: bool = (
+        os.getenv("MODEL_GOVERNANCE_ENABLED", "false").strip().lower() == "true"
+    )
+    # If true, experiments are assigned and tracked in shadow mode.
+    model_governance_experiments_enabled: bool = (
+        os.getenv("MODEL_GOVERNANCE_EXPERIMENTS_ENABLED", "false").strip().lower() == "true"
+    )
+    # If true, decision audits are written per pick (safe to enable).
+    model_governance_decision_audit_enabled: bool = (
+        os.getenv("MODEL_GOVERNANCE_DECISION_AUDIT_ENABLED", "true").strip().lower() == "true"
+    )
+    # Never activates flags automatically — only produces recommendations.
+    model_governance_auto_activate: bool = (
+        os.getenv("MODEL_GOVERNANCE_AUTO_ACTIVATE", "false").strip().lower() == "true"
+    )
+    # If true, writes experiment results to DuckDB.
+    model_governance_write_to_duckdb: bool = (
+        os.getenv("MODEL_GOVERNANCE_WRITE_TO_DUCKDB", "true").strip().lower() == "true"
+    )
+    # Minimum sample sizes per module gate.
+    model_governance_min_sample_strategy: int = _int("MODEL_GOVERNANCE_MIN_SAMPLE_STRATEGY", 200)
+    model_governance_min_sample_bankroll: int = _int("MODEL_GOVERNANCE_MIN_SAMPLE_BANKROLL", 100)
+    model_governance_min_sample_market: int = _int("MODEL_GOVERNANCE_MIN_SAMPLE_MARKET", 150)
+    model_governance_min_sample_parlay: int = _int("MODEL_GOVERNANCE_MIN_SAMPLE_PARLAY", 50)
+    # Scheduler
+    scheduler_governance_enabled: bool = (
+        os.getenv("SCHEDULER_GOVERNANCE_ENABLED", "false").strip().lower() == "true"
+    )
+    scheduler_governance_time: str = os.getenv("SCHEDULER_GOVERNANCE_TIME", "23:30").strip()
+
     # ── Política de ingestión histórica (Phase 3) ─────────────────────────────
     # Máximo de temporadas cerradas a conservar por liga en DuckDB.
     history_max_closed_seasons: int = _int("HISTORY_MAX_CLOSED_SEASONS", 4)

@@ -588,6 +588,44 @@ async def bankroll_risk_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         log_scheduler_run(conn, job_key, "error", start, datetime.now(timezone.utc), error_message=str(exc))
 
 
+async def model_governance_job(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Nightly model governance — run experiment lab and update activation recommendations."""
+    job_key = "model_governance"
+    start = datetime.now(timezone.utc)
+    conn = _conn()
+
+    from app.services.scheduler_service import log_scheduler_run, update_scheduler_state
+
+    try:
+        if not settings.scheduler_governance_enabled:
+            return
+
+        logger.info("[scheduler] %s: iniciando governance lab", job_key)
+
+        from app.services.model_governance_service import run_governance_job
+        dry_run = not settings.model_governance_write_to_duckdb
+        outcome = run_governance_job(conn, days=30, dry_run=dry_run)
+
+        end = datetime.now(timezone.utc)
+        update_scheduler_state(conn, "last_model_governance", end.isoformat())
+        log_scheduler_run(
+            conn, job_key, "completed", start, end,
+            metadata={
+                "experiments_processed": outcome.get("experiments_processed", 0),
+                "dry_run": dry_run,
+            },
+        )
+        logger.info(
+            "[scheduler] %s: %d experimentos procesados (dry_run=%s) en %.1fs",
+            job_key, outcome.get("experiments_processed", 0), dry_run,
+            (end - start).total_seconds(),
+        )
+
+    except Exception as exc:
+        logger.error("[scheduler] %s: ERROR — %s", job_key, exc, exc_info=True)
+        log_scheduler_run(conn, job_key, "error", start, datetime.now(timezone.utc), error_message=str(exc))
+
+
 async def daily_report_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Send daily performance report to admin users."""
     job_key = "daily_report"

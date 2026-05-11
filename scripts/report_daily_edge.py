@@ -174,6 +174,24 @@ def _build_report(conn, days: int) -> dict:
     except Exception as e:
         report["live"] = {"error": str(e)}
 
+    # ── Model Governance ──────────────────────────────────────────────────────
+    try:
+        from app.data.local.model_governance_repo import (
+            get_activation_recommendations,
+            get_governance_summary,
+        )
+        summary = get_governance_summary(conn)
+        recs = get_activation_recommendations(conn)
+        report["governance"] = {
+            "experiments": summary.get("experiments", {}),
+            "audit_7d":    summary.get("audit_7d", {}),
+            "recommendations": {
+                r["module"]: r["recommendation"] for r in recs
+            },
+        }
+    except Exception as e:
+        report["governance"] = {"error": str(e)}
+
     return report
 
 
@@ -269,6 +287,24 @@ def _print_report(report: dict) -> None:
         print(f"  [warn] {lv['error']}")
     else:
         print(f"  Fixtures tracked: {lv.get('fixtures_tracked', 0)}")
+
+    _section("Model Governance")
+    gv = report.get("governance") or {}
+    if "error" in gv:
+        print(f"  [warn] {gv['error']}")
+    else:
+        exp_counts = gv.get("experiments") or {}
+        active_n = exp_counts.get("active", 0)
+        print(f"  Active experiments: {active_n}")
+        audit = gv.get("audit_7d") or {}
+        print(f"  Audits (7d):        {audit.get('total', 0)}  changed={audit.get('changed', 0)}")
+        recs = gv.get("recommendations") or {}
+        if recs:
+            print("  Module recommendations:")
+            for module, rec in recs.items():
+                print(f"    {module:20s}  {rec}")
+        else:
+            print("  No recommendations yet — run run_experiment_lab.py --execute")
 
     print(f"\n{'=' * 55}\n")
 

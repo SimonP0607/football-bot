@@ -312,6 +312,26 @@ async def _route(intent: str, args: dict, update: Update, context: ContextTypes.
         await stake_handler(update, context)
         return "stake_handler"
 
+    elif intent in ("governance_summary", "experiment_summary", "model_comparison"):
+        from app.bot.handlers.gobernanza import gobernanza_handler
+        await gobernanza_handler(update, context)
+        return "gobernanza_handler"
+
+    elif intent == "experiment_summary":
+        from app.bot.handlers.gobernanza import experimentos_handler
+        await experimentos_handler(update, context)
+        return "experimentos_handler"
+
+    elif intent in ("activation_readiness", "why_not_activate"):
+        from app.bot.handlers.gobernanza import activar_handler
+        await activar_handler(update, context)
+        return "activar_handler"
+
+    elif intent in ("safe_mode_help",):
+        from app.bot.handlers.gobernanza import gobernanza_handler
+        await gobernanza_handler(update, context)
+        return "gobernanza_handler"
+
     elif intent == "help":
         context.args = []
         await ayuda_handler(update, context)

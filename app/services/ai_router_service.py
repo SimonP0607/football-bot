@@ -34,6 +34,9 @@ _VALID_INTENTS = {
     # Phase 14: Bankroll & Risk
     "bankroll_summary", "risk_summary", "stake_question",
     "exposure_question", "correlation_question", "bankroll_help",
+    # Phase 15: Model Governance
+    "governance_summary", "experiment_summary", "activation_readiness",
+    "model_comparison", "why_not_activate", "safe_mode_help",
 }
 
 _EMPTY_ARGS = {
@@ -255,6 +258,52 @@ def classify_with_rules(text: str, user_context: dict | None = None) -> dict:
     if _has(t, "bookmaker", "casa de apuestas", "casas de apuestas", "bet365",
              "pinnacle", "betfair", "1xbet", "cobertura de casas"):
         return _make_result("bookmaker_coverage", 0.88)
+
+    # ── Phase 15: Model Governance (highest priority, before bankroll) ──────────
+
+    # safe_mode_help: what is governance / safe mode / shadow mode
+    if _has(t, "gobernanza", "governance", "como funciona la gobernanza",
+             "que es la gobernanza", "modo shadow", "shadow mode", "modo seguro"):
+        return _make_result("safe_mode_help", 0.95)
+    if _has(t, "ayuda") and _has(t, "gobernanza", "experimentos", "activacion"):
+        return _make_result("safe_mode_help", 0.90)
+
+    # governance_summary: show governance dashboard
+    if _has(t, "gobernanza") and _has(t, "resumen", "estado", "ver", "mostrar", "como esta",
+                                       "dashboard", "informe"):
+        return _make_result("governance_summary", 0.95)
+    if _has(t, "gobernanza") and not _has(t, "ayuda", "help", "como funciona"):
+        return _make_result("governance_summary", 0.85)
+
+    # experiment_summary: show experiment results
+    if _has(t, "experimentos", "experiment", "variantes", "variants") and _has(
+        t, "resultado", "resultado", "ver", "mostrar", "estado", "resumen"
+    ):
+        return _make_result("experiment_summary", 0.95)
+    if _has(t, "variant_strategy", "variant_bankroll", "variant_market", "variant_parlay",
+             "baseline_current", "experimento activo"):
+        return _make_result("experiment_summary", 0.92)
+
+    # activation_readiness: is module ready to activate?
+    if _has(t, "listo para activar", "puedo activar", "se puede activar",
+             "readiness", "activation readiness", "preparado para activar"):
+        return _make_result("activation_readiness", 0.95)
+    if _has(t, "activar") and _has(t, "modulo", "módulo", "motor", "engine", "cuando"):
+        return _make_result("activation_readiness", 0.90)
+
+    # model_comparison: compare modules / variants
+    if _has(t, "comparar modulos", "comparar variantes", "cual es mejor",
+             "mejor variante", "diferencia entre variantes", "model comparison"):
+        return _make_result("model_comparison", 0.92)
+    if _has(t, "comparar") and _has(t, "strategy learning", "bankroll", "market clv", "parlay"):
+        return _make_result("model_comparison", 0.88)
+
+    # why_not_activate: explain why a module is not ready
+    if _has(t, "por que no se activa", "por que no activa", "why not activate",
+             "que le falta", "que necesita para activar", "que falta para activar"):
+        return _make_result("why_not_activate", 0.95)
+    if _has(t, "bloqueado") and _has(t, "activar", "modulo", "motor"):
+        return _make_result("why_not_activate", 0.88)
 
     # ── Phase 14: Bankroll & Risk (before fixture_analysis) ──────────────────
 
